@@ -8,6 +8,7 @@ Pair Trading Screener API
 import itertools
 import math
 import time
+from datetime import datetime, timezone
 from typing import List, Optional
 
 import numpy as np
@@ -230,6 +231,63 @@ _HEADERS = {
 }
 
 
+def _download_yahoo_chart(tickers: List[str], start_date: str) -> pd.DataFrame:
+    """
+    Fallback for Render/yfinance quirks. Uses Yahoo's public chart endpoint
+    directly and returns a Close-like dataframe indexed by date.
+    """
+    start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
+    end_ts = int(time.time())
+    series = {}
+
+    for ticker in tickers:
+        url = (
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+            f"?period1={start_ts}&period2={end_ts}&interval=1d&events=history"
+        )
+        try:
+            r = requests.get(url, headers=_HEADERS, timeout=15)
+            r.raise_for_status()
+            result = (r.json().get("chart", {}).get("result") or [None])[0]
+            if not result:
+                continue
+
+            timestamps = result.get("timestamp") or []
+            indicators = result.get("indicators", {})
+            adjclose = (indicators.get("adjclose") or [{}])[0].get("adjclose")
+            close = (indicators.get("quote") or [{}])[0].get("close")
+            values = adjclose or close or []
+
+            if not timestamps or not values:
+                continue
+
+            idx = pd.to_datetime(timestamps, unit="s").date
+            series[ticker] = pd.Series(values, index=pd.to_datetime(idx), dtype="float64")
+        except Exception:
+            continue
+
+    if not series:
+        return pd.DataFrame()
+
+    return pd.DataFrame(series).dropna(axis=1, how="all")
+
+
+def _download_prices(tickers: List[str], start_date: str) -> pd.DataFrame:
+    try:
+        data = yf.download(tickers, start=start_date, auto_adjust=True, progress=False)
+        if "Close" in data:
+            prices = data["Close"]
+            if isinstance(prices, pd.Series):
+                prices = prices.to_frame(tickers[0])
+            prices = prices.dropna(axis=1, how="all")
+            if len(prices.dropna()) >= 2:
+                return prices
+    except Exception:
+        pass
+
+    return _download_yahoo_chart(tickers, start_date)
+
+
 def _fetch_live():
     now = time.time()
     if _LIVE_CACHE["data"] is not None and (now - _LIVE_CACHE["ts"] < CACHE_TTL):
@@ -265,14 +323,10 @@ def single_pair(req: SinglePairRequest):
         raise HTTPException(status_code=400, detail="Tickers must be different and non-empty.")
     start_date = f"{req.start_year}-01-01"
 
-    try:
-        data = yf.download([t1, t2], start=start_date, auto_adjust=True, progress=False)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"yfinance error: {e}")
-
-    if "Close" not in data:
+    prices = _download_prices([t1, t2], start_date)
+    if prices.empty:
         raise HTTPException(status_code=400, detail="No price data returned.")
-    prices = data["Close"]
+
     if isinstance(prices, pd.Series) or t1 not in prices.columns or t2 not in prices.columns:
         raise HTTPException(status_code=400, detail="Ticker not found.")
     prices = prices[[t1, t2]].dropna()
@@ -301,14 +355,10 @@ def screener(req: ScreenerRequest):
         raise HTTPException(status_code=400, detail="Provide at least 2 tickers.")
     start_date = f"{req.start_year}-01-01"
 
-    try:
-        data = yf.download(tickers, start=start_date, auto_adjust=True, progress=False)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"yfinance error: {e}")
-
-    if "Close" not in data:
+    prices = _download_prices(tickers, start_date)
+    if prices.empty:
         raise HTTPException(status_code=400, detail="No price data returned.")
-    prices = data["Close"]
+
     if isinstance(prices, pd.Series):
         raise HTTPException(status_code=400, detail="Need at least 2 valid tickers.")
     prices = prices.dropna(axis=1, how="all")
