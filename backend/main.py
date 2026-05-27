@@ -90,7 +90,7 @@ def analyze_pair(ticker1, ticker2, prices, window_days, target_return, min_signa
     if ticker1 not in prices.columns or ticker2 not in prices.columns:
         return None, None
     pair_prices = prices[[ticker1, ticker2]].dropna()
-    if len(pair_prices) < window_days + 100:
+    if len(pair_prices) < window_days + 2:
         return None, None
 
     s1, s2 = pair_prices[ticker1], pair_prices[ticker2]
@@ -142,7 +142,37 @@ def analyze_pair(ticker1, ticker2, prices, window_days, target_return, min_signa
         })
         i += window_days
 
+    ratio_now  = ratio.iloc[-1]
+
+    if   ratio_now >= upper2: current_signal = "SHORT 2σ"
+    elif ratio_now <= lower2: current_signal = "LONG 2σ"
+    elif ratio_now >= upper1: current_signal = "SHORT 1σ"
+    elif ratio_now <= lower1: current_signal = "LONG 1σ"
+    else:                     current_signal = "SIN SEÑAL"
+
     if not signals:
+        if min_signals <= 1:
+            summary = {
+                "pair": f"{ticker1}/{ticker2}",
+                "ticker1": ticker1, "ticker2": ticker2,
+                "signals": 0,
+                "winrate_5pct_30d": None,
+                "avg_return_30d": None,
+                "avg_days_to_target": None,
+                "corr": _safe_float(corr),
+                "adf_p": _safe_float(adf_p),
+                "coint_p": _safe_float(coint_p),
+                "half_life": _safe_float(half_life),
+                "ratio_now": _safe_float(ratio_now),
+                "median":  _safe_float(median),
+                "upper1":  _safe_float(upper1), "lower1": _safe_float(lower1),
+                "upper2":  _safe_float(upper2), "lower2": _safe_float(lower2),
+                "p1_now":  _safe_float(s1.iloc[-1]),
+                "p2_now":  _safe_float(s2.iloc[-1]),
+                "current_signal": current_signal,
+                "score": 0,
+            }
+            return summary, []
         return None, None
     if len(signals) < min_signals:
         return None, signals
@@ -151,13 +181,6 @@ def analyze_pair(ticker1, ticker2, prices, window_days, target_return, min_signa
     winrate    = df["success"].mean()
     avg_return = df["max_return_30d"].mean()
     avg_days   = df["days_to_target"].dropna().mean() if df["days_to_target"].notna().any() else None
-    ratio_now  = ratio.iloc[-1]
-
-    if   ratio_now >= upper2: current_signal = "SHORT 2σ"
-    elif ratio_now <= lower2: current_signal = "LONG 2σ"
-    elif ratio_now >= upper1: current_signal = "SHORT 1σ"
-    elif ratio_now <= lower1: current_signal = "LONG 1σ"
-    else:                     current_signal = "SIN SEÑAL"
 
     adf_pen   = 1/(1+adf_p)   if pd.notna(adf_p)   else 0.5
     coint_pen = 1/(1+coint_p) if pd.notna(coint_p) else 0.5
@@ -253,7 +276,7 @@ def single_pair(req: SinglePairRequest):
     if isinstance(prices, pd.Series) or t1 not in prices.columns or t2 not in prices.columns:
         raise HTTPException(status_code=400, detail="Ticker not found.")
     prices = prices[[t1, t2]].dropna()
-    if len(prices) < req.window_days + 100:
+    if len(prices) < req.window_days + 2:
         raise HTTPException(status_code=400, detail="Not enough history.")
 
     summary, signals = analyze_pair(t1, t2, prices, req.window_days, req.target_return, 1)
