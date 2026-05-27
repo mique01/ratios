@@ -62,6 +62,7 @@ document.querySelectorAll('.tab').forEach(btn => {
 const fmtPct = v => (v === null || v === undefined || isNaN(v)) ? '—' : (v * 100).toFixed(2) + '%';
 const fmtNum = (v, d = 3) => (v === null || v === undefined || isNaN(v)) ? '—' : Number(v).toFixed(d);
 const fmtMoney = v => (v === null || v === undefined || isNaN(v)) ? '—' : '$' + Number(v).toFixed(2);
+const parseDecimal = value => parseFloat(String(value).replace(',', '.'));
 
 function setMsg(id, text, cls = '') {
   const el = document.getElementById(id);
@@ -81,7 +82,7 @@ async function runSingle() {
   const t2 = document.getElementById('t2').value.toUpperCase().trim();
   const startYear   = parseInt(document.getElementById('start-year').value, 10);
   const windowDays  = parseInt(document.getElementById('window-days').value, 10);
-  const targetRet   = parseFloat(document.getElementById('target-return').value);
+  const targetRet   = parseDecimal(document.getElementById('target-return').value);
 
   if (!t1 || !t2 || t1 === t2) {
     setMsg('single-msg', 'TICKERS MUST BE DIFFERENT & NON-EMPTY', 'err');
@@ -245,7 +246,7 @@ async function runScreener() {
         tickers,
         start_year:    parseInt(document.getElementById('sc-start-year').value, 10),
         window_days:   parseInt(document.getElementById('sc-window').value, 10),
-        target_return: parseFloat(document.getElementById('sc-target').value),
+        target_return: parseDecimal(document.getElementById('sc-target').value),
         min_signals:   parseInt(document.getElementById('sc-minsig').value, 10)
       })
     });
@@ -314,7 +315,7 @@ function renderScreener() {
       addToWatchlist({
         ...row,
         window_days:   parseInt(document.getElementById('sc-window').value, 10),
-        target_return: parseFloat(document.getElementById('sc-target').value),
+        target_return: parseDecimal(document.getElementById('sc-target').value),
       });
       btn.textContent = '✓ ADDED'; btn.classList.add('added'); btn.disabled = true;
     });

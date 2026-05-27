@@ -90,7 +90,7 @@ def analyze_pair(ticker1, ticker2, prices, window_days, target_return, min_signa
     if ticker1 not in prices.columns or ticker2 not in prices.columns:
         return None, None
     pair_prices = prices[[ticker1, ticker2]].dropna()
-    if len(pair_prices) < window_days + 2:
+    if len(pair_prices) < 2:
         return None, None
 
     s1, s2 = pair_prices[ticker1], pair_prices[ticker2]
@@ -276,7 +276,7 @@ def single_pair(req: SinglePairRequest):
     if isinstance(prices, pd.Series) or t1 not in prices.columns or t2 not in prices.columns:
         raise HTTPException(status_code=400, detail="Ticker not found.")
     prices = prices[[t1, t2]].dropna()
-    if len(prices) < req.window_days + 2:
+    if len(prices) < 2:
         raise HTTPException(status_code=400, detail="Not enough history.")
 
     summary, signals = analyze_pair(t1, t2, prices, req.window_days, req.target_return, 1)
