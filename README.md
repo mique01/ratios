@@ -5,6 +5,7 @@ Bloomberg-style terminal for mean-reversion pair trading with **live price feed*
 - **Single Pair** — historical analysis of any 2 tickers, with stats and a chart
 - **Multi-Pair Screener** — paste a free list of tickers, get all pairs ranked by score
 - **Watchlist** — saved signals with **live P&L** updated every 25s from data912.com
+- **Bollinger Pair** — SMA20 ±2STD ratio bands with 5% / 7-day fast-regression stats
 
 ```
 pair-trading-screener/
@@ -93,6 +94,7 @@ Use **EXPORT JSON** to back up the watchlist before clearing browser data.
 |--------|------|--------------|
 | GET    | `/`                  | health |
 | POST   | `/api/single-pair`   | `{ticker1, ticker2, start_year, window_days, target_return}` |
+| POST   | `/api/bollinger-pair` | `{ticker1, ticker2, start_year}` |
 | POST   | `/api/screener`      | `{tickers: [...], start_year, window_days, target_return, min_signals}` |
 | GET    | `/api/live-prices?symbols=KO,PEP` | live prices proxied from data912 |
 

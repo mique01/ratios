@@ -220,6 +220,137 @@ document.getElementById('add-watch-single').addEventListener('click', () => {
 });
 
 // ============================================================
+// BOLLINGER PAIR
+// ============================================================
+
+let bollingerChart = null;
+
+async function runBollinger() {
+  const t1 = document.getElementById('b-t1').value.toUpperCase().trim();
+  const t2 = document.getElementById('b-t2').value.toUpperCase().trim();
+  const startYear = parseInt(document.getElementById('b-start-year').value, 10);
+
+  if (!t1 || !t2 || t1 === t2) {
+    setMsg('bollinger-msg', 'TICKERS MUST BE DIFFERENT & NON-EMPTY', 'err');
+    return;
+  }
+
+  const btn = document.getElementById('run-bollinger');
+  btn.disabled = true; btn.textContent = '⏳ RUNNING…';
+  setMsg('bollinger-msg', `ANALYZING BOLLINGER ${t1}/${t2} FROM ${startYear}…`);
+  setFooter(`BOLLINGER: ${t1}/${t2}`);
+
+  try {
+    const r = await fetch(`${BACKEND_URL}/api/bollinger-pair`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticker1: t1, ticker2: t2, start_year: startYear })
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+    const data = await r.json();
+    renderBollinger(data, t1, t2);
+    setMsg('bollinger-msg', `✓ ${t1}/${t2} BOLLINGER ANALYZED · ${data.signals.length} TOUCHES`, 'ok');
+  } catch (e) {
+    setMsg('bollinger-msg', `✕ ERROR · ${e.message}`, 'err');
+  } finally {
+    btn.disabled = false; btn.textContent = '▶ RUN BOLLINGER';
+    setFooter('IDLE');
+  }
+}
+
+function renderBollinger(data, t1, t2) {
+  const s = data.summary;
+  const setVal = (id, v, cls = '') => {
+    const el = document.getElementById(id); el.textContent = v; el.className = 'val ' + cls;
+  };
+
+  setVal('b-corr',    fmtNum(s.corr, 3),  s.corr > 0.7 ? 'good' : s.corr > 0.4 ? 'warn' : 'bad');
+  setVal('b-adf',     fmtNum(s.adf_p, 4), s.adf_p < 0.05 ? 'good' : s.adf_p < 0.10 ? 'warn' : 'bad');
+  setVal('b-coint',   fmtNum(s.coint_p, 4), s.coint_p < 0.05 ? 'good' : s.coint_p < 0.10 ? 'warn' : 'bad');
+  setVal('b-hl',      s.half_life === null ? '∞' : fmtNum(s.half_life, 1) + 'd',
+                       s.half_life && s.half_life < 30 ? 'good' : 'warn');
+  setVal('b-ratio',   fmtNum(s.ratio_now, 4));
+  setVal('b-mean',    fmtNum(s.mean20, 4));
+  setVal('b-winrate', fmtPct(s.winrate_5pct_7d),
+                       s.winrate_5pct_7d > 0.7 ? 'good' : s.winrate_5pct_7d > 0.5 ? 'warn' : 'bad');
+  setVal('b-avgmove', fmtPct(s.avg_move_7d),
+                       s.avg_move_7d > 0.05 ? 'good' : s.avg_move_7d > 0 ? 'warn' : 'bad');
+
+  const cs = document.getElementById('b-current-signal');
+  cs.textContent = `▍ CURRENT: ${s.current_signal}`;
+  cs.className = 'current-signal';
+  if (s.current_signal.startsWith('LONG'))       cs.classList.add('long');
+  else if (s.current_signal.startsWith('SHORT')) cs.classList.add('short');
+
+  const lines = [];
+  if (s.signals === 0)                  lines.push({ cls: 'warn', txt: 'NO BOLLINGER TOUCHES IN SELECTED HISTORY' });
+  else if (s.winrate_5pct_7d > 0.7)     lines.push({ cls: 'good', txt: 'STRONG FAST-REGRESSION PROFILE' });
+  else if (s.winrate_5pct_7d > 0.5)     lines.push({ cls: 'warn', txt: 'MODERATE FAST-REGRESSION PROFILE' });
+  else                                  lines.push({ cls: 'bad',  txt: 'LOW 7D FOLLOW-THROUGH CONSISTENCY' });
+  lines.push({ cls: 'warn', txt: 'RULE: -2STD COUNTS 5% RATIO RISE; +2STD COUNTS 5% RATIO DROP' });
+  if (s.half_life && s.half_life < 30)  lines.push({ cls: 'good', txt: `HALF-LIFE: ${fmtNum(s.half_life,1)}d` });
+
+  document.getElementById('b-interpret').innerHTML =
+    lines.map(l => `<div class="line ${l.cls}"><strong>›</strong> ${l.txt}</div>`).join('');
+
+  renderBollingerChart(data.chart, t1, t2);
+  renderBollingerTable(data.signals);
+}
+
+function renderBollingerChart(chart, t1, t2) {
+  const ctx = document.getElementById('bollinger-chart').getContext('2d');
+  if (bollingerChart) bollingerChart.destroy();
+  bollingerChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: chart.dates, datasets: [
+      { label: `${t1}/${t2}`, data: chart.ratio,  borderColor: '#ffb000', borderWidth: 1.5, pointRadius: 0, tension: 0.05 },
+      { label: 'SMA20',       data: chart.mean20, borderColor: '#8a8a8a', borderWidth: 1, borderDash: [6, 4], pointRadius: 0 },
+      { label: '+2STD',       data: chart.upper2, borderColor: '#ff3b3b', borderWidth: 1, borderDash: [6, 2], pointRadius: 0 },
+      { label: '-2STD',       data: chart.lower2, borderColor: '#00d166', borderWidth: 1, borderDash: [6, 2], pointRadius: 0 },
+    ]},
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { intersect: false, mode: 'index' },
+      plugins: {
+        legend: { labels: { color: '#8a8a8a', font: { family: 'JetBrains Mono', size: 10 }, boxWidth: 18 } },
+        tooltip: { backgroundColor: '#0a0a0a', borderColor: '#ffb000', borderWidth: 1,
+          titleColor: '#ffb000', bodyColor: '#e8e6e1',
+          titleFont: { family: 'JetBrains Mono', size: 11 }, bodyFont:  { family: 'JetBrains Mono', size: 11 } }
+      },
+      scales: {
+        x: { ticks: { color: '#5a5a5a', font: { family: 'JetBrains Mono', size: 9 }, maxTicksLimit: 12 }, grid: { color: '#1c1c1f' } },
+        y: { ticks: { color: '#5a5a5a', font: { family: 'JetBrains Mono', size: 9 } },                    grid: { color: '#1c1c1f' } }
+      }
+    }
+  });
+}
+
+function renderBollingerTable(signals) {
+  const tbody = document.querySelector('#bollinger-table tbody');
+  if (!signals || signals.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">— NO BOLLINGER TOUCHES —</td></tr>'; return;
+  }
+  tbody.innerHTML = signals.slice().reverse().map(s => {
+    const sideCls = s.signal === 'LONG' ? 'long' : 'short';
+    const moveCls = s.max_move_7d >= 0.05 ? 'good' : s.max_move_7d >= 0 ? 'warn' : 'bad';
+    return `<tr>
+      <td>${s.entry}</td>
+      <td><span class="signal-badge ${sideCls}">${s.signal}</span></td>
+      <td class="dim">${s.level}</td>
+      <td class="num dim">${fmtNum(s.entry_ratio, 4)}</td>
+      <td class="num ${moveCls}">${fmtPct(s.max_move_7d)}</td>
+      <td class="num dim">${s.days_to_target ?? '—'}</td>
+      <td><span class="signal-badge ${s.success ? 'hit' : 'miss'}">${s.success ? 'HIT' : 'MISS'}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+document.getElementById('run-bollinger').addEventListener('click', runBollinger);
+
+// ============================================================
 // SCREENER
 // ============================================================
 

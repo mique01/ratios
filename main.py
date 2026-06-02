@@ -1,6 +1,7 @@
 """
 Pair Trading Screener API
 - /api/single-pair    historical analysis of one pair (yfinance)
+- /api/bollinger-pair historical Bollinger-band analysis of one ratio
 - /api/screener       screener over a free list of tickers (yfinance)
 - /api/live-prices    proxies data912.com live prices (real-time)
 """
@@ -8,6 +9,7 @@ Pair Trading Screener API
 import itertools
 import math
 import time
+from datetime import datetime, timezone
 from typing import List, Optional
 
 import numpy as np
@@ -40,6 +42,12 @@ class SinglePairRequest(BaseModel):
     start_year: int = 2022
     window_days: int = 30
     target_return: float = 0.05
+
+
+class BollingerPairRequest(BaseModel):
+    ticker1: str
+    ticker2: str
+    start_year: int = 2022
 
 
 class ScreenerRequest(BaseModel):
@@ -90,7 +98,7 @@ def analyze_pair(ticker1, ticker2, prices, window_days, target_return, min_signa
     if ticker1 not in prices.columns or ticker2 not in prices.columns:
         return None, None
     pair_prices = prices[[ticker1, ticker2]].dropna()
-    if len(pair_prices) < window_days + 100:
+    if len(pair_prices) < 2:
         return None, None
 
     s1, s2 = pair_prices[ticker1], pair_prices[ticker2]
@@ -142,7 +150,37 @@ def analyze_pair(ticker1, ticker2, prices, window_days, target_return, min_signa
         })
         i += window_days
 
+    ratio_now  = ratio.iloc[-1]
+
+    if   ratio_now >= upper2: current_signal = "SHORT 2σ"
+    elif ratio_now <= lower2: current_signal = "LONG 2σ"
+    elif ratio_now >= upper1: current_signal = "SHORT 1σ"
+    elif ratio_now <= lower1: current_signal = "LONG 1σ"
+    else:                     current_signal = "SIN SEÑAL"
+
     if not signals:
+        if min_signals <= 1:
+            summary = {
+                "pair": f"{ticker1}/{ticker2}",
+                "ticker1": ticker1, "ticker2": ticker2,
+                "signals": 0,
+                "winrate_5pct_30d": None,
+                "avg_return_30d": None,
+                "avg_days_to_target": None,
+                "corr": _safe_float(corr),
+                "adf_p": _safe_float(adf_p),
+                "coint_p": _safe_float(coint_p),
+                "half_life": _safe_float(half_life),
+                "ratio_now": _safe_float(ratio_now),
+                "median":  _safe_float(median),
+                "upper1":  _safe_float(upper1), "lower1": _safe_float(lower1),
+                "upper2":  _safe_float(upper2), "lower2": _safe_float(lower2),
+                "p1_now":  _safe_float(s1.iloc[-1]),
+                "p2_now":  _safe_float(s2.iloc[-1]),
+                "current_signal": current_signal,
+                "score": 0,
+            }
+            return summary, []
         return None, None
     if len(signals) < min_signals:
         return None, signals
@@ -151,13 +189,6 @@ def analyze_pair(ticker1, ticker2, prices, window_days, target_return, min_signa
     winrate    = df["success"].mean()
     avg_return = df["max_return_30d"].mean()
     avg_days   = df["days_to_target"].dropna().mean() if df["days_to_target"].notna().any() else None
-    ratio_now  = ratio.iloc[-1]
-
-    if   ratio_now >= upper2: current_signal = "SHORT 2σ"
-    elif ratio_now <= lower2: current_signal = "LONG 2σ"
-    elif ratio_now >= upper1: current_signal = "SHORT 1σ"
-    elif ratio_now <= lower1: current_signal = "LONG 1σ"
-    else:                     current_signal = "SIN SEÑAL"
 
     adf_pen   = 1/(1+adf_p)   if pd.notna(adf_p)   else 0.5
     coint_pen = 1/(1+coint_p) if pd.notna(coint_p) else 0.5
@@ -187,6 +218,131 @@ def analyze_pair(ticker1, ticker2, prices, window_days, target_return, min_signa
     return summary, signals
 
 
+def analyze_bollinger_pair(ticker1, ticker2, prices, lookback=20, target_return=0.05, forward_days=7):
+    if ticker1 not in prices.columns or ticker2 not in prices.columns:
+        return None, None, None
+    pair_prices = prices[[ticker1, ticker2]].dropna()
+    if len(pair_prices) < lookback + forward_days + 2:
+        return None, None, None
+
+    s1, s2 = pair_prices[ticker1], pair_prices[ticker2]
+    ratio = (s1 / s2).dropna()
+    mean = ratio.rolling(lookback).mean()
+    std = ratio.rolling(lookback).std()
+    upper = mean + 2 * std
+    lower = mean - 2 * std
+
+    spread = np.log(s1) - np.log(s2)
+    corr = s1.corr(s2)
+    try:    adf_p = adfuller(spread.dropna())[1]
+    except Exception: adf_p = float("nan")
+    try:    coint_p = coint(np.log(s1), np.log(s2))[1]
+    except Exception: coint_p = float("nan")
+    half_life = calculate_half_life(spread)
+
+    signals = []
+    i = lookback
+    while i < len(ratio) - forward_days:
+        if pd.isna(upper.iloc[i]) or pd.isna(lower.iloc[i]) or pd.isna(upper.iloc[i - 1]) or pd.isna(lower.iloc[i - 1]):
+            i += 1
+            continue
+
+        r, r_prev = ratio.iloc[i], ratio.iloc[i - 1]
+        signal = None
+        if r_prev < upper.iloc[i - 1] and r >= upper.iloc[i]:
+            signal = "SHORT"
+        elif r_prev > lower.iloc[i - 1] and r <= lower.iloc[i]:
+            signal = "LONG"
+        if signal is None:
+            i += 1
+            continue
+
+        entry_ratio = ratio.iloc[i]
+        best_move = -999.0
+        days_to_target = None
+        for j in range(i + 1, i + forward_days + 1):
+            if j >= len(ratio):
+                break
+            move = ratio.iloc[j] / entry_ratio - 1
+            directional_move = move if signal == "LONG" else -move
+            if directional_move > best_move:
+                best_move = directional_move
+            if directional_move >= target_return and days_to_target is None:
+                days_to_target = j - i
+
+        signals.append({
+            "entry": ratio.index[i].strftime("%Y-%m-%d"),
+            "signal": signal,
+            "level": "-2STD" if signal == "LONG" else "+2STD",
+            "entry_ratio": _safe_float(entry_ratio),
+            "band": _safe_float(lower.iloc[i] if signal == "LONG" else upper.iloc[i]),
+            "max_move_7d": _safe_float(best_move),
+            "days_to_target": days_to_target,
+            "success": bool(best_move >= target_return),
+        })
+        i += forward_days
+
+    valid = pd.DataFrame({"ratio": ratio, "mean": mean, "upper": upper, "lower": lower}).dropna()
+    if valid.empty:
+        return None, None, None
+
+    ratio_now = ratio.iloc[-1]
+    mean_now = mean.iloc[-1]
+    upper_now = upper.iloc[-1]
+    lower_now = lower.iloc[-1]
+
+    if pd.isna(upper_now) or pd.isna(lower_now):
+        current_signal = "SIN SEÑAL"
+    elif ratio_now >= upper_now:
+        current_signal = "SHORT +2STD"
+    elif ratio_now <= lower_now:
+        current_signal = "LONG -2STD"
+    else:
+        current_signal = "SIN SEÑAL"
+
+    if signals:
+        df = pd.DataFrame(signals)
+        winrate = df["success"].mean()
+        avg_move = df["max_move_7d"].mean()
+        avg_days = df["days_to_target"].dropna().mean() if df["days_to_target"].notna().any() else None
+    else:
+        winrate = None
+        avg_move = None
+        avg_days = None
+
+    summary = {
+        "pair": f"{ticker1}/{ticker2}",
+        "ticker1": ticker1, "ticker2": ticker2,
+        "signals": len(signals),
+        "winrate_5pct_7d": _safe_float(winrate),
+        "avg_move_7d": _safe_float(avg_move),
+        "avg_days_to_target": _safe_float(avg_days),
+        "corr": _safe_float(corr),
+        "adf_p": _safe_float(adf_p),
+        "coint_p": _safe_float(coint_p),
+        "half_life": _safe_float(half_life),
+        "ratio_now": _safe_float(ratio_now),
+        "mean20": _safe_float(mean_now),
+        "upper2": _safe_float(upper_now),
+        "lower2": _safe_float(lower_now),
+        "p1_now": _safe_float(s1.iloc[-1]),
+        "p2_now": _safe_float(s2.iloc[-1]),
+        "current_signal": current_signal,
+        "lookback": lookback,
+        "forward_days": forward_days,
+        "target_return": target_return,
+    }
+
+    chart = {
+        "dates": [d.strftime("%Y-%m-%d") for d in ratio.index],
+        "ratio": [_safe_float(v) for v in ratio.values],
+        "mean20": [_safe_float(v) for v in mean.values],
+        "upper2": [_safe_float(v) for v in upper.values],
+        "lower2": [_safe_float(v) for v in lower.values],
+    }
+    return summary, signals, chart
+
+
 # ========================================================================
 # DATA912 — live price cache (20s TTL since they update every 20s)
 # ========================================================================
@@ -205,6 +361,63 @@ _HEADERS = {
     ),
     "Accept": "application/json, text/plain, */*",
 }
+
+
+def _download_yahoo_chart(tickers: List[str], start_date: str) -> pd.DataFrame:
+    """
+    Fallback for Render/yfinance quirks. Uses Yahoo's public chart endpoint
+    directly and returns a Close-like dataframe indexed by date.
+    """
+    start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
+    end_ts = int(time.time())
+    series = {}
+
+    for ticker in tickers:
+        url = (
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+            f"?period1={start_ts}&period2={end_ts}&interval=1d&events=history"
+        )
+        try:
+            r = requests.get(url, headers=_HEADERS, timeout=15)
+            r.raise_for_status()
+            result = (r.json().get("chart", {}).get("result") or [None])[0]
+            if not result:
+                continue
+
+            timestamps = result.get("timestamp") or []
+            indicators = result.get("indicators", {})
+            adjclose = (indicators.get("adjclose") or [{}])[0].get("adjclose")
+            close = (indicators.get("quote") or [{}])[0].get("close")
+            values = adjclose or close or []
+
+            if not timestamps or not values:
+                continue
+
+            idx = pd.to_datetime(timestamps, unit="s").date
+            series[ticker] = pd.Series(values, index=pd.to_datetime(idx), dtype="float64")
+        except Exception:
+            continue
+
+    if not series:
+        return pd.DataFrame()
+
+    return pd.DataFrame(series).dropna(axis=1, how="all")
+
+
+def _download_prices(tickers: List[str], start_date: str) -> pd.DataFrame:
+    try:
+        data = yf.download(tickers, start=start_date, auto_adjust=True, progress=False)
+        if "Close" in data:
+            prices = data["Close"]
+            if isinstance(prices, pd.Series):
+                prices = prices.to_frame(tickers[0])
+            prices = prices.dropna(axis=1, how="all")
+            if len(prices.dropna()) >= 2:
+                return prices
+    except Exception:
+        pass
+
+    return _download_yahoo_chart(tickers, start_date)
 
 
 def _fetch_live():
@@ -242,18 +455,14 @@ def single_pair(req: SinglePairRequest):
         raise HTTPException(status_code=400, detail="Tickers must be different and non-empty.")
     start_date = f"{req.start_year}-01-01"
 
-    try:
-        data = yf.download([t1, t2], start=start_date, auto_adjust=True, progress=False)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"yfinance error: {e}")
-
-    if "Close" not in data:
+    prices = _download_prices([t1, t2], start_date)
+    if prices.empty:
         raise HTTPException(status_code=400, detail="No price data returned.")
-    prices = data["Close"]
+
     if isinstance(prices, pd.Series) or t1 not in prices.columns or t2 not in prices.columns:
         raise HTTPException(status_code=400, detail="Ticker not found.")
     prices = prices[[t1, t2]].dropna()
-    if len(prices) < req.window_days + 100:
+    if len(prices) < 2:
         raise HTTPException(status_code=400, detail="Not enough history.")
 
     summary, signals = analyze_pair(t1, t2, prices, req.window_days, req.target_return, 1)
@@ -271,6 +480,29 @@ def single_pair(req: SinglePairRequest):
     return {"summary": summary, "signals": signals or [], "chart": chart}
 
 
+@app.post("/api/bollinger-pair")
+def bollinger_pair(req: BollingerPairRequest):
+    t1 = req.ticker1.upper().strip()
+    t2 = req.ticker2.upper().strip()
+    if t1 == t2 or not t1 or not t2:
+        raise HTTPException(status_code=400, detail="Tickers must be different and non-empty.")
+    start_date = f"{req.start_year}-01-01"
+
+    prices = _download_prices([t1, t2], start_date)
+    if prices.empty:
+        raise HTTPException(status_code=400, detail="No price data returned.")
+
+    if isinstance(prices, pd.Series) or t1 not in prices.columns or t2 not in prices.columns:
+        raise HTTPException(status_code=400, detail="Ticker not found.")
+    prices = prices[[t1, t2]].dropna()
+
+    summary, signals, chart = analyze_bollinger_pair(t1, t2, prices)
+    if summary is None:
+        raise HTTPException(status_code=400, detail="Not enough history for Bollinger analysis.")
+
+    return {"summary": summary, "signals": signals or [], "chart": chart}
+
+
 @app.post("/api/screener")
 def screener(req: ScreenerRequest):
     tickers = sorted({t.upper().strip() for t in req.tickers if t.strip()})
@@ -278,14 +510,10 @@ def screener(req: ScreenerRequest):
         raise HTTPException(status_code=400, detail="Provide at least 2 tickers.")
     start_date = f"{req.start_year}-01-01"
 
-    try:
-        data = yf.download(tickers, start=start_date, auto_adjust=True, progress=False)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"yfinance error: {e}")
-
-    if "Close" not in data:
+    prices = _download_prices(tickers, start_date)
+    if prices.empty:
         raise HTTPException(status_code=400, detail="No price data returned.")
-    prices = data["Close"]
+
     if isinstance(prices, pd.Series):
         raise HTTPException(status_code=400, detail="Need at least 2 valid tickers.")
     prices = prices.dropna(axis=1, how="all")

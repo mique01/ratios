@@ -29,6 +29,7 @@
   <button class="tab active" data-tab="single">F1 · SINGLE PAIR</button>
   <button class="tab" data-tab="screener">F2 · MULTI-PAIR SCREENER</button>
   <button class="tab" data-tab="watchlist">F3 · WATCHLIST <span class="badge" id="watchlist-count">0</span></button>
+  <button class="tab" data-tab="bollinger">F4 · BOLLINGER PAIR</button>
   <div class="tabs-tail">BACKEND <span id="backend-host">—</span></div>
 </nav>
 
@@ -78,6 +79,56 @@
         <table class="data-table" id="signals-table">
           <thead><tr><th>ENTRY</th><th>SIDE</th><th>LEVEL</th><th>MAX RET</th><th>DAYS</th><th>HIT</th></tr></thead>
           <tbody><tr><td colspan="6" class="empty">— RUN AN ANALYSIS TO POPULATE —</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================== BOLLINGER PAIR ================== -->
+<section id="tab-bollinger" class="tab-panel">
+  <div class="grid-single">
+    <div class="panel">
+      <div class="panel-head">▌ BOLLINGER PARAMETERS</div>
+      <div class="panel-body form">
+        <label><span>TICKER 1</span>     <input id="b-t1" type="text" value="KO"   maxlength="6" /></label>
+        <label><span>TICKER 2</span>     <input id="b-t2" type="text" value="PEP"  maxlength="6" /></label>
+        <label><span>START YEAR</span>   <input id="b-start-year" type="number" value="2022" min="2000" max="2026" /></label>
+        <div class="info-pill">SMA20 · ±2STD · 5% IN 7D</div>
+        <button id="run-bollinger" class="btn-run">▶ RUN BOLLINGER</button>
+        <div id="bollinger-msg" class="msg"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">▌ BOLLINGER STATISTICS</div>
+      <div class="panel-body">
+        <div class="stat-grid">
+          <div class="stat"><span class="lbl">CORR</span><span class="val" id="b-corr">—</span></div>
+          <div class="stat"><span class="lbl">ADF p</span><span class="val" id="b-adf">—</span></div>
+          <div class="stat"><span class="lbl">COINT p</span><span class="val" id="b-coint">—</span></div>
+          <div class="stat"><span class="lbl">HALF-LIFE</span><span class="val" id="b-hl">—</span></div>
+          <div class="stat"><span class="lbl">RATIO NOW</span><span class="val" id="b-ratio">—</span></div>
+          <div class="stat"><span class="lbl">SMA20</span><span class="val" id="b-mean">—</span></div>
+          <div class="stat"><span class="lbl">WINRATE 7D</span><span class="val" id="b-winrate">—</span></div>
+          <div class="stat"><span class="lbl">AVG MOVE</span><span class="val" id="b-avgmove">—</span></div>
+        </div>
+        <div class="current-signal" id="b-current-signal">— NO ANALYSIS RUN —</div>
+        <div class="interpret" id="b-interpret"></div>
+      </div>
+    </div>
+
+    <div class="panel panel-chart">
+      <div class="panel-head">▌ RATIO CHART · SMA20 ± 2STD BOLLINGER BANDS</div>
+      <div class="panel-body chart-wrap"><canvas id="bollinger-chart"></canvas></div>
+    </div>
+
+    <div class="panel panel-table">
+      <div class="panel-head">▌ BOLLINGER TOUCHES · 5% MOVE WITHIN 7D</div>
+      <div class="panel-body table-wrap">
+        <table class="data-table" id="bollinger-table">
+          <thead><tr><th>ENTRY</th><th>SIDE</th><th>BAND</th><th>ENTRY RATIO</th><th>MAX MOVE</th><th>DAYS</th><th>HIT</th></tr></thead>
+          <tbody><tr><td colspan="7" class="empty">— RUN AN ANALYSIS TO POPULATE —</td></tr></tbody>
         </table>
       </div>
     </div>
