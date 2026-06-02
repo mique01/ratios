@@ -138,6 +138,20 @@ body {
   font-size: 10px; font-weight: 700; letter-spacing: 0.2em;
   color: var(--amber);
 }
+.panel-head-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.chart-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-mute);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+}
 .panel-body { padding: 14px; flex: 1; min-height: 0; }
 
 /* ---------------- single grid ---------------- */
@@ -215,6 +229,20 @@ body {
 .btn-row:hover { background: rgba(255, 176, 0, 0.1); }
 .btn-row.added { color: var(--green); border-color: var(--green-dim); cursor: default; }
 
+.btn-mini {
+  background: transparent;
+  border: 1px solid var(--amber-dim);
+  color: var(--amber);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  padding: 3px 8px;
+}
+.btn-mini:hover { background: rgba(255, 176, 0, 0.1); border-color: var(--amber); }
+.btn-mini:disabled { color: var(--text-mute); border-color: var(--line-2); cursor: not-allowed; }
+
 .msg { font-size: 10px; color: var(--text-dim); letter-spacing: 0.08em; min-height: 14px; }
 .msg.err { color: var(--red); }
 .msg.ok  { color: var(--green); }
@@ -256,6 +284,8 @@ body {
 
 /* ---------------- chart ---------------- */
 .chart-wrap { position: relative; height: 100%; padding: 8px; }
+.chart-wrap canvas { cursor: grab; }
+.chart-wrap canvas:active { cursor: grabbing; }
 
 /* ---------------- tables ---------------- */
 .table-wrap { overflow: auto; max-height: 540px; padding: 0; }

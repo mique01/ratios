@@ -70,6 +70,52 @@ function setMsg(id, text, cls = '') {
 }
 function setFooter(text) { document.getElementById('footer-mid').textContent = text; }
 
+function makeZoomOptions(resetButtonId) {
+  const setResetEnabled = enabled => {
+    const btn = document.getElementById(resetButtonId);
+    if (btn) btn.disabled = !enabled;
+  };
+
+  return {
+    pan: {
+      enabled: true,
+      mode: 'xy',
+      onPanStart: () => setResetEnabled(true),
+    },
+    zoom: {
+      wheel: { enabled: true, speed: 0.08 },
+      pinch: { enabled: true },
+      mode: 'xy',
+      onZoomStart: () => setResetEnabled(true),
+    },
+    limits: {
+      x: { min: 'original', max: 'original' },
+      y: { min: 'original', max: 'original' },
+    },
+  };
+}
+
+function bindResetZoom(buttonId, getChart) {
+  const btn = document.getElementById(buttonId);
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    resetChartZoom(btn, getChart());
+  });
+}
+
+function resetChartZoom(button, chart) {
+  if (!chart || typeof chart.resetZoom !== 'function') return;
+  chart.resetZoom();
+  button.disabled = true;
+}
+
+function bindCanvasDoubleClick(canvasId, resetButtonId, getChart) {
+  const canvas = document.getElementById(canvasId);
+  const btn = document.getElementById(resetButtonId);
+  if (!canvas || !btn) return;
+  canvas.ondblclick = () => resetChartZoom(btn, getChart());
+}
+
 // ============================================================
 // SINGLE PAIR
 // ============================================================
@@ -181,7 +227,8 @@ function renderChart(chart, t1, t2) {
         legend: { labels: { color: '#8a8a8a', font: { family: 'JetBrains Mono', size: 10 }, boxWidth: 18 } },
         tooltip: { backgroundColor: '#0a0a0a', borderColor: '#ffb000', borderWidth: 1,
           titleColor: '#ffb000', bodyColor: '#e8e6e1',
-          titleFont: { family: 'JetBrains Mono', size: 11 }, bodyFont:  { family: 'JetBrains Mono', size: 11 } }
+          titleFont: { family: 'JetBrains Mono', size: 11 }, bodyFont:  { family: 'JetBrains Mono', size: 11 } },
+        zoom: makeZoomOptions('reset-ratio-zoom')
       },
       scales: {
         x: { ticks: { color: '#5a5a5a', font: { family: 'JetBrains Mono', size: 9 }, maxTicksLimit: 12 }, grid: { color: '#1c1c1f' } },
@@ -189,6 +236,8 @@ function renderChart(chart, t1, t2) {
       }
     }
   });
+  document.getElementById('reset-ratio-zoom').disabled = true;
+  bindCanvasDoubleClick('ratio-chart', 'reset-ratio-zoom', () => ratioChart);
 }
 
 function renderSignalsTable(signals) {
@@ -318,7 +367,8 @@ function renderBollingerChart(chart, t1, t2) {
         legend: { labels: { color: '#8a8a8a', font: { family: 'JetBrains Mono', size: 10 }, boxWidth: 18 } },
         tooltip: { backgroundColor: '#0a0a0a', borderColor: '#ffb000', borderWidth: 1,
           titleColor: '#ffb000', bodyColor: '#e8e6e1',
-          titleFont: { family: 'JetBrains Mono', size: 11 }, bodyFont:  { family: 'JetBrains Mono', size: 11 } }
+          titleFont: { family: 'JetBrains Mono', size: 11 }, bodyFont:  { family: 'JetBrains Mono', size: 11 } },
+        zoom: makeZoomOptions('reset-bollinger-zoom')
       },
       scales: {
         x: { ticks: { color: '#5a5a5a', font: { family: 'JetBrains Mono', size: 9 }, maxTicksLimit: 12 }, grid: { color: '#1c1c1f' } },
@@ -326,6 +376,8 @@ function renderBollingerChart(chart, t1, t2) {
       }
     }
   });
+  document.getElementById('reset-bollinger-zoom').disabled = true;
+  bindCanvasDoubleClick('bollinger-chart', 'reset-bollinger-zoom', () => bollingerChart);
 }
 
 function renderBollingerTable(signals) {
@@ -349,6 +401,8 @@ function renderBollingerTable(signals) {
 }
 
 document.getElementById('run-bollinger').addEventListener('click', runBollinger);
+bindResetZoom('reset-ratio-zoom', () => ratioChart);
+bindResetZoom('reset-bollinger-zoom', () => bollingerChart);
 
 // ============================================================
 // SCREENER
