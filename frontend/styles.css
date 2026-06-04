@@ -170,6 +170,23 @@ body {
 .panel-chart { grid-area: chart; height: 420px; }
 .panel-table { grid-area: table; }
 
+.grid-robust {
+  grid-template-columns: 280px 1fr 1fr;
+  grid-template-rows: auto 360px auto auto;
+  grid-template-areas:
+    "form stats stats"
+    "spread spread zchart"
+    "opt opt trades"
+    "equity equity equity";
+}
+.grid-robust > .panel:nth-child(1) { grid-area: form; }
+.grid-robust > .panel:nth-child(2) { grid-area: stats; }
+.grid-robust .robust-spread { grid-area: spread; height: 360px; }
+.grid-robust .robust-z { grid-area: zchart; height: 360px; }
+.grid-robust .robust-opt { grid-area: opt; }
+.grid-robust .robust-trades { grid-area: trades; }
+.grid-robust .robust-equity { grid-area: equity; height: 300px; }
+
 /* ---------------- forms ---------------- */
 .form        { display: flex; flex-direction: column; gap: 10px; }
 .form-stack  { display: flex; flex-direction: column; gap: 14px; }
@@ -193,6 +210,16 @@ body {
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 .form-stack textarea { resize: vertical; line-height: 1.5; }
+
+.check-row {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 8px !important;
+}
+.check-row input {
+  width: auto;
+  accent-color: var(--amber);
+}
 
 .form input:focus, .form-inline input:focus, .form-inline select:focus,
 .form-stack input:focus, .form-stack textarea:focus, .form-stack select:focus {
@@ -345,6 +372,11 @@ body {
 @media (max-width: 980px) {
   .grid-single { grid-template-columns: 1fr;
     grid-template-areas: "form" "stats" "chart" "table"; }
+  .grid-robust {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto;
+    grid-template-areas: "form" "stats" "spread" "zchart" "opt" "trades" "equity";
+  }
   .stat-grid { grid-template-columns: repeat(2, 1fr); }
   .brand-build { display: none; }
 }

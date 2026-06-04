@@ -405,6 +405,219 @@ bindResetZoom('reset-ratio-zoom', () => ratioChart);
 bindResetZoom('reset-bollinger-zoom', () => bollingerChart);
 
 // ============================================================
+// ROBUST PAIR
+// ============================================================
+
+let robustSpreadChart = null;
+let robustZChart = null;
+let robustEquityChart = null;
+let lastRobustSummary = null;
+
+async function runRobust() {
+  const t1 = document.getElementById('r-t1').value.toUpperCase().trim();
+  const t2 = document.getElementById('r-t2').value.toUpperCase().trim();
+  const startYear = parseInt(document.getElementById('r-start-year').value, 10);
+  const targetRet = parseDecimal(document.getElementById('r-target').value);
+  const cost = parseDecimal(document.getElementById('r-cost').value);
+  const minSignals = parseInt(document.getElementById('r-minsig').value, 10);
+  const useTargetExit = document.getElementById('r-use-target').checked;
+
+  if (!t1 || !t2 || t1 === t2) {
+    setMsg('robust-msg', 'TICKERS MUST BE DIFFERENT & NON-EMPTY', 'err');
+    return;
+  }
+
+  const btn = document.getElementById('run-robust');
+  const addBtn = document.getElementById('add-watch-robust');
+  btn.disabled = true; btn.textContent = 'RUNNING...';
+  addBtn.disabled = true;
+  setMsg('robust-msg', `RUNNING ROBUST OLS BACKTEST ${t1}/${t2} FROM ${startYear}...`);
+  setFooter(`ROBUST: ${t1}/${t2}`);
+
+  try {
+    const r = await fetch(`${BACKEND_URL}/api/robust-pair`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ticker1: t1,
+        ticker2: t2,
+        start_year: startYear,
+        target_return: targetRet,
+        use_target_exit: useTargetExit,
+        transaction_cost: cost,
+        min_signals: minSignals
+      })
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+    const data = await r.json();
+    lastRobustSummary = data.summary;
+    renderRobust(data, t1, t2);
+    addBtn.disabled = lastRobustSummary.current_signal === 'SIN SEÑAL';
+    setMsg('robust-msg', `OK ${t1}/${t2} ROBUST ANALYZED · ${data.trades.length} TRADES · BEST W${data.summary.best_window}/Z${data.summary.best_entry_z}`, 'ok');
+  } catch (e) {
+    setMsg('robust-msg', `ERROR · ${e.message}`, 'err');
+  } finally {
+    btn.disabled = false; btn.textContent = 'RUN ROBUST';
+    setFooter('IDLE');
+  }
+}
+
+function renderRobust(data, t1, t2) {
+  const s = data.summary;
+  const setVal = (id, v, cls = '') => {
+    const el = document.getElementById(id); el.textContent = v; el.className = 'val ' + cls;
+  };
+
+  setVal('r-beta', fmtNum(s.hedge_ratio, 4));
+  setVal('r-adf', fmtNum(s.adf_p, 4), s.adf_p < 0.05 ? 'good' : s.adf_p < 0.10 ? 'warn' : 'bad');
+  setVal('r-coint', fmtNum(s.coint_p, 4), s.coint_p < 0.05 ? 'good' : s.coint_p < 0.10 ? 'warn' : 'bad');
+  setVal('r-hl', s.half_life === null ? 'inf' : fmtNum(s.half_life, 1) + 'd', s.half_life && s.half_life < 60 ? 'good' : 'warn');
+  setVal('r-best', `${s.best_window}/${fmtNum(s.best_entry_z, 2)}`);
+  setVal('r-znow', fmtNum(s.zscore_now, 2), Math.abs(s.zscore_now || 0) >= s.best_entry_z ? 'warn' : '');
+  setVal('r-winrate', fmtPct(s.winrate), s.winrate > 0.65 ? 'good' : s.winrate > 0.5 ? 'warn' : 'bad');
+  setVal('r-totalret', fmtPct(s.total_return), s.total_return > 0 ? 'good' : 'bad');
+
+  const cs = document.getElementById('r-current-signal');
+  cs.textContent = `CURRENT: ${s.current_signal}`;
+  cs.className = 'current-signal';
+  if (s.current_signal.startsWith('LONG')) cs.classList.add('long');
+  else if (s.current_signal.startsWith('SHORT')) cs.classList.add('short');
+
+  document.getElementById('r-interpret').innerHTML =
+    data.diagnostic.map(l => `<div class="line ${l.type}"><strong>›</strong> ${l.text}</div>`).join('');
+
+  renderRobustSpreadChart(data.chart, t1, t2);
+  renderRobustZChart(data.chart, s.best_entry_z, t1, t2);
+  renderRobustEquityChart(data.chart, t1, t2);
+  renderRobustOptimization(data.optimization);
+  renderRobustTrades(data.trades);
+}
+
+function renderRobustSpreadChart(chart, t1, t2) {
+  const ctx = document.getElementById('robust-spread-chart').getContext('2d');
+  if (robustSpreadChart) robustSpreadChart.destroy();
+  robustSpreadChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: chart.dates, datasets: [
+      { label: `OLS SPREAD ${t1}/${t2}`, data: chart.spread, borderColor: '#ffb000', borderWidth: 1.5, pointRadius: 0, tension: 0.05 },
+      { label: 'MEAN', data: chart.mean, borderColor: '#8a8a8a', borderWidth: 1, borderDash: [6, 4], pointRadius: 0 },
+      { label: 'UPPER', data: chart.upper, borderColor: '#ff3b3b', borderWidth: 1, borderDash: [6, 2], pointRadius: 0 },
+      { label: 'LOWER', data: chart.lower, borderColor: '#00d166', borderWidth: 1, borderDash: [6, 2], pointRadius: 0 },
+    ]},
+    options: chartOptions('reset-robust-spread-zoom')
+  });
+  document.getElementById('reset-robust-spread-zoom').disabled = true;
+  bindCanvasDoubleClick('robust-spread-chart', 'reset-robust-spread-zoom', () => robustSpreadChart);
+}
+
+function renderRobustZChart(chart, entryZ, t1, t2) {
+  const ctx = document.getElementById('robust-z-chart').getContext('2d');
+  if (robustZChart) robustZChart.destroy();
+  const len = chart.dates.length;
+  const flat = v => Array(len).fill(v);
+  robustZChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: chart.dates, datasets: [
+      { label: `Z ${t1}/${t2}`, data: chart.zscore, borderColor: '#4ea1ff', borderWidth: 1.5, pointRadius: 0, tension: 0.05 },
+      { label: `+${entryZ}`, data: flat(entryZ), borderColor: '#ff3b3b', borderWidth: 1, borderDash: [6, 2], pointRadius: 0 },
+      { label: `-${entryZ}`, data: flat(-entryZ), borderColor: '#00d166', borderWidth: 1, borderDash: [6, 2], pointRadius: 0 },
+      { label: 'ZERO', data: flat(0), borderColor: '#8a8a8a', borderWidth: 1, borderDash: [3, 3], pointRadius: 0 },
+    ]},
+    options: chartOptions('reset-robust-z-zoom')
+  });
+  document.getElementById('reset-robust-z-zoom').disabled = true;
+  bindCanvasDoubleClick('robust-z-chart', 'reset-robust-z-zoom', () => robustZChart);
+}
+
+function renderRobustEquityChart(chart, t1, t2) {
+  const ctx = document.getElementById('robust-equity-chart').getContext('2d');
+  if (robustEquityChart) robustEquityChart.destroy();
+  const labels = chart.equity.map(p => p.date);
+  const values = chart.equity.map(p => p.equity);
+  robustEquityChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets: [
+      { label: `EQUITY ${t1}/${t2}`, data: values, borderColor: '#00d166', borderWidth: 2, pointRadius: 2, tension: 0.12 },
+    ]},
+    options: chartOptions('reset-robust-equity-zoom')
+  });
+  document.getElementById('reset-robust-equity-zoom').disabled = true;
+  bindCanvasDoubleClick('robust-equity-chart', 'reset-robust-equity-zoom', () => robustEquityChart);
+}
+
+function chartOptions(resetButtonId) {
+  return {
+    responsive: true, maintainAspectRatio: false,
+    interaction: { intersect: false, mode: 'index' },
+    plugins: {
+      legend: { labels: { color: '#8a8a8a', font: { family: 'JetBrains Mono', size: 10 }, boxWidth: 18 } },
+      tooltip: { backgroundColor: '#0a0a0a', borderColor: '#ffb000', borderWidth: 1,
+        titleColor: '#ffb000', bodyColor: '#e8e6e1',
+        titleFont: { family: 'JetBrains Mono', size: 11 }, bodyFont: { family: 'JetBrains Mono', size: 11 } },
+      zoom: makeZoomOptions(resetButtonId)
+    },
+    scales: {
+      x: { ticks: { color: '#5a5a5a', font: { family: 'JetBrains Mono', size: 9 }, maxTicksLimit: 12 }, grid: { color: '#1c1c1f' } },
+      y: { ticks: { color: '#5a5a5a', font: { family: 'JetBrains Mono', size: 9 } }, grid: { color: '#1c1c1f' } }
+    }
+  };
+}
+
+function renderRobustOptimization(rows) {
+  const tbody = document.querySelector('#robust-opt-table tbody');
+  if (!rows || rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="10" class="empty">- NO OPTIMIZATION RESULTS -</td></tr>'; return;
+  }
+  tbody.innerHTML = rows.map(r => `<tr>
+    <td class="num">${r.bb_window}</td>
+    <td class="num">${fmtNum(r.entry_z, 2)}</td>
+    <td class="num dim">${r.signals}</td>
+    <td class="num">${fmtPct(r.winrate)}</td>
+    <td class="num">${fmtPct(r.avg_return)}</td>
+    <td class="num">${fmtPct(r.total_return)}</td>
+    <td class="num">${fmtNum(r.sharpe, 2)}</td>
+    <td class="num ${r.max_drawdown < -0.10 ? 'bad' : 'dim'}">${fmtPct(r.max_drawdown)}</td>
+    <td class="num dim">${fmtNum(r.avg_days, 1)}</td>
+    <td class="num warn">${fmtNum(r.score, 2)}</td>
+  </tr>`).join('');
+}
+
+function renderRobustTrades(trades) {
+  const tbody = document.querySelector('#robust-trades-table tbody');
+  if (!trades || trades.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="10" class="empty">- NO TRADES WITH BEST CONFIG -</td></tr>'; return;
+  }
+  tbody.innerHTML = trades.slice(-15).reverse().map(t => {
+    const sideCls = t.signal.startsWith('LONG') ? 'long' : 'short';
+    return `<tr>
+      <td>${t.entry_date}</td>
+      <td>${t.exit_date}</td>
+      <td><span class="signal-badge ${sideCls}">${t.signal.replace('_SPREAD', '')}</span></td>
+      <td class="num">${fmtNum(t.entry_z, 2)}</td>
+      <td class="num dim">${fmtNum(t.exit_z, 2)}</td>
+      <td class="num dim">${t.days}</td>
+      <td class="num ${t.net_return > 0 ? 'good' : 'bad'}">${fmtPct(t.net_return)}</td>
+      <td class="num good">${fmtPct(t.best_return)}</td>
+      <td class="num bad">${fmtPct(t.worst_return)}</td>
+      <td class="dim">${t.exit_reason}</td>
+    </tr>`;
+  }).join('');
+}
+
+document.getElementById('run-robust').addEventListener('click', runRobust);
+document.getElementById('add-watch-robust').addEventListener('click', () => {
+  if (!lastRobustSummary) return;
+  addToWatchlist({ ...lastRobustSummary, model_type: 'ROBUST_OLS' });
+  setMsg('robust-msg', `OK ADDED ${lastRobustSummary.pair} TO WATCHLIST`, 'ok');
+});
+bindResetZoom('reset-robust-spread-zoom', () => robustSpreadChart);
+bindResetZoom('reset-robust-z-zoom', () => robustZChart);
+bindResetZoom('reset-robust-equity-zoom', () => robustEquityChart);
+
+// ============================================================
 // SCREENER
 // ============================================================
 
@@ -517,12 +730,15 @@ document.getElementById('sc-signal').addEventListener('change', renderScreener);
 function addToWatchlist(s) {
   const list = loadWatch();
   const opened = new Date().toISOString();
+  const signalText = s.current_signal || '';
   const item = {
     id: `${s.pair}@${opened}`,
     pair: s.pair,
     ticker1: s.ticker1, ticker2: s.ticker2,
-    side:  s.current_signal.startsWith('LONG') ? 'LONG' : 'SHORT',
-    level: s.current_signal.replace(/(LONG|SHORT)\s+/, ''),
+    side:  signalText.startsWith('LONG') ? 'LONG' : 'SHORT',
+    level: signalText.replace(/(LONG|SHORT)[\s_]+/, '').replace('_SPREAD', ' SPREAD'),
+    model_type: s.model_type || 'RATIO',
+    hedge_ratio: s.hedge_ratio ?? 1,
     opened,
     entry_p1:    s.p1_now,
     entry_p2:    s.p2_now,
@@ -545,9 +761,10 @@ function removeFromWatchlist(id) {
 
 function computePnL(item, p1Now, p2Now) {
   if (p1Now == null || p2Now == null || !item.entry_p1 || !item.entry_p2) return null;
+  const hedgeRatio = item.hedge_ratio ?? 1;
   const r1 = p1Now / item.entry_p1 - 1;
   const r2 = p2Now / item.entry_p2 - 1;
-  return item.side === 'LONG' ? (r1 - r2) : (-r1 + r2);
+  return item.side === 'LONG' ? (r1 - hedgeRatio * r2) : (-r1 + hedgeRatio * r2);
 }
 
 function daysSince(iso) {

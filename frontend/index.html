@@ -32,6 +32,7 @@
   <button class="tab" data-tab="screener">F2 · MULTI-PAIR SCREENER</button>
   <button class="tab" data-tab="watchlist">F3 · WATCHLIST <span class="badge" id="watchlist-count">0</span></button>
   <button class="tab" data-tab="bollinger">F4 · BOLLINGER PAIR</button>
+  <button class="tab" data-tab="robust">F5 · ROBUST PAIR</button>
   <div class="tabs-tail">BACKEND <span id="backend-host">—</span></div>
 </nav>
 
@@ -143,6 +144,95 @@
           <tbody><tr><td colspan="7" class="empty">— RUN AN ANALYSIS TO POPULATE —</td></tr></tbody>
         </table>
       </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================== ROBUST PAIR ================== -->
+<section id="tab-robust" class="tab-panel">
+  <div class="grid-single grid-robust">
+    <div class="panel">
+      <div class="panel-head">ROBUST PARAMETERS</div>
+      <div class="panel-body form">
+        <label><span>TICKER 1</span>     <input id="r-t1" type="text" value="KO" maxlength="6" /></label>
+        <label><span>TICKER 2</span>     <input id="r-t2" type="text" value="PEP" maxlength="6" /></label>
+        <label><span>START YEAR</span>   <input id="r-start-year" type="number" value="2022" min="2000" max="2026" /></label>
+        <label><span>TARGET RET</span>   <input id="r-target" type="number" value="0.05" step="0.01" min="0" max="0.5" /></label>
+        <label><span>COST/TRD</span>     <input id="r-cost" type="number" value="0.002" step="0.001" min="0" max="0.05" /></label>
+        <label><span>MIN SIGNALS</span>  <input id="r-minsig" type="number" value="5" min="1" max="30" /></label>
+        <label class="check-row"><input id="r-use-target" type="checkbox" /> <span>EXIT ON TARGET</span></label>
+        <button id="run-robust" class="btn-run">RUN ROBUST</button>
+        <button id="add-watch-robust" class="btn-ghost" disabled>ADD TO WATCHLIST</button>
+        <div id="robust-msg" class="msg"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">ROBUST OLS STATS</div>
+      <div class="panel-body">
+        <div class="stat-grid">
+          <div class="stat"><span class="lbl">BETA</span><span class="val" id="r-beta">-</span></div>
+          <div class="stat"><span class="lbl">ADF p</span><span class="val" id="r-adf">-</span></div>
+          <div class="stat"><span class="lbl">COINT p</span><span class="val" id="r-coint">-</span></div>
+          <div class="stat"><span class="lbl">HALF-LIFE</span><span class="val" id="r-hl">-</span></div>
+          <div class="stat"><span class="lbl">BEST W/Z</span><span class="val" id="r-best">-</span></div>
+          <div class="stat"><span class="lbl">Z NOW</span><span class="val" id="r-znow">-</span></div>
+          <div class="stat"><span class="lbl">WINRATE</span><span class="val" id="r-winrate">-</span></div>
+          <div class="stat"><span class="lbl">TOTAL RET</span><span class="val" id="r-totalret">-</span></div>
+        </div>
+        <div class="current-signal" id="r-current-signal">- NO ANALYSIS RUN -</div>
+        <div class="interpret" id="r-interpret"></div>
+      </div>
+    </div>
+
+    <div class="panel panel-chart robust-spread">
+      <div class="panel-head panel-head-tools" title="Mouse wheel zoom, drag to pan">
+        <span>OLS SPREAD + OPTIMIZED BANDS</span>
+        <div class="chart-tools">
+          <button id="reset-robust-spread-zoom" class="btn-mini" title="Reset chart zoom" disabled>RESET</button>
+        </div>
+      </div>
+      <div class="panel-body chart-wrap"><canvas id="robust-spread-chart"></canvas></div>
+    </div>
+
+    <div class="panel panel-chart robust-z">
+      <div class="panel-head panel-head-tools" title="Mouse wheel zoom, drag to pan">
+        <span>Z-SCORE + ENTRY THRESHOLDS</span>
+        <div class="chart-tools">
+          <button id="reset-robust-z-zoom" class="btn-mini" title="Reset chart zoom" disabled>RESET</button>
+        </div>
+      </div>
+      <div class="panel-body chart-wrap"><canvas id="robust-z-chart"></canvas></div>
+    </div>
+
+    <div class="panel panel-table robust-opt">
+      <div class="panel-head">TOP PARAMETERS</div>
+      <div class="panel-body table-wrap">
+        <table class="data-table" id="robust-opt-table">
+          <thead><tr><th>W</th><th>Z</th><th>SIG</th><th>WIN%</th><th>AVG</th><th>TOTAL</th><th>SHARPE</th><th>MDD</th><th>AVG D</th><th>SCORE</th></tr></thead>
+          <tbody><tr><td colspan="10" class="empty">- RUN ROBUST ANALYSIS -</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel panel-table robust-trades">
+      <div class="panel-head">LAST TRADES</div>
+      <div class="panel-body table-wrap">
+        <table class="data-table" id="robust-trades-table">
+          <thead><tr><th>ENTRY</th><th>EXIT</th><th>SIDE</th><th>ENTRY Z</th><th>EXIT Z</th><th>DAYS</th><th>NET</th><th>BEST</th><th>WORST</th><th>REASON</th></tr></thead>
+          <tbody><tr><td colspan="10" class="empty">- RUN ROBUST ANALYSIS -</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel panel-chart robust-equity">
+      <div class="panel-head panel-head-tools" title="Mouse wheel zoom, drag to pan">
+        <span>EQUITY CURVE</span>
+        <div class="chart-tools">
+          <button id="reset-robust-equity-zoom" class="btn-mini" title="Reset chart zoom" disabled>RESET</button>
+        </div>
+      </div>
+      <div class="panel-body chart-wrap"><canvas id="robust-equity-chart"></canvas></div>
     </div>
   </div>
 </section>

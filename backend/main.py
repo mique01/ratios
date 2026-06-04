@@ -15,6 +15,7 @@ from typing import List, Optional
 import numpy as np
 import pandas as pd
 import requests
+import statsmodels.api as sm
 import yfinance as yf
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -48,6 +49,19 @@ class BollingerPairRequest(BaseModel):
     ticker1: str
     ticker2: str
     start_year: int = 2022
+
+
+class RobustPairRequest(BaseModel):
+    ticker1: str
+    ticker2: str
+    start_year: int = 2022
+    target_return: float = 0.05
+    use_target_exit: bool = False
+    transaction_cost: float = 0.002
+    min_signals: int = 5
+    max_half_life_filter: int = 60
+    windows_to_test: List[int] = Field(default_factory=lambda: [10, 15, 20, 25, 30, 40, 50, 60])
+    stds_to_test: List[float] = Field(default_factory=lambda: [1.5, 1.75, 2.0, 2.25, 2.5])
 
 
 class ScreenerRequest(BaseModel):
@@ -343,6 +357,401 @@ def analyze_bollinger_pair(ticker1, ticker2, prices, lookback=20, target_return=
     return summary, signals, chart
 
 
+def calculate_hedge_ratio_and_spread(prices: pd.DataFrame, ticker1: str, ticker2: str):
+    log_p1 = np.log(prices[ticker1])
+    log_p2 = np.log(prices[ticker2])
+
+    X = sm.add_constant(log_p2)
+    model = sm.OLS(log_p1, X).fit()
+
+    beta = float(model.params.iloc[1])
+    alpha = float(model.params.iloc[0])
+    spread = log_p1 - beta * log_p2
+
+    return spread, beta, alpha
+
+
+def max_drawdown(returns) -> float:
+    if len(returns) == 0:
+        return float("nan")
+
+    equity = (1 + pd.Series(returns)).cumprod()
+    peak = equity.cummax()
+    drawdown = equity / peak - 1
+
+    return float(drawdown.min())
+
+
+def run_robust_backtest(
+    prices,
+    spread,
+    ticker1,
+    ticker2,
+    hedge_ratio,
+    bb_window=20,
+    entry_z=2.0,
+    exit_z=0.0,
+    target_return=0.05,
+    use_target_exit=False,
+    transaction_cost=0.002,
+    min_signals=5,
+):
+    rolling_mean = spread.rolling(bb_window).mean()
+    rolling_std = spread.rolling(bb_window).std()
+    zscore = (spread - rolling_mean) / rolling_std
+
+    half_life = calculate_half_life(spread)
+
+    if np.isfinite(half_life):
+        max_trade_days = int(min(bb_window, max(3, round(2 * half_life))))
+    else:
+        max_trade_days = bb_window
+
+    trades = []
+    i = bb_window + 1
+
+    while i < len(spread) - 1:
+        z = zscore.iloc[i]
+        z_prev = zscore.iloc[i - 1]
+
+        if np.isnan(z) or np.isnan(z_prev):
+            i += 1
+            continue
+
+        signal = None
+        if z_prev < entry_z and z >= entry_z:
+            signal = "SHORT_SPREAD"
+        elif z_prev > -entry_z and z <= -entry_z:
+            signal = "LONG_SPREAD"
+
+        if signal is None:
+            i += 1
+            continue
+
+        entry_idx = i
+        entry_date = spread.index[entry_idx]
+
+        p1_entry = prices[ticker1].iloc[entry_idx]
+        p2_entry = prices[ticker2].iloc[entry_idx]
+        spread_entry = spread.iloc[entry_idx]
+        z_entry = zscore.iloc[entry_idx]
+
+        exit_idx = None
+        exit_reason = None
+        best_return = -999.0
+        worst_return = 999.0
+        current_return = 0.0
+
+        max_forward = min(entry_idx + max_trade_days, len(spread) - 1)
+
+        for j in range(entry_idx + 1, max_forward + 1):
+            p1_now = prices[ticker1].iloc[j]
+            p2_now = prices[ticker2].iloc[j]
+
+            ret1 = p1_now / p1_entry - 1
+            ret2 = p2_now / p2_entry - 1
+
+            if signal == "LONG_SPREAD":
+                current_return = ret1 - hedge_ratio * ret2
+                if zscore.iloc[j] >= exit_z:
+                    exit_idx = j
+                    exit_reason = "MEAN_REVERSION"
+                    break
+            else:
+                current_return = -ret1 + hedge_ratio * ret2
+                if zscore.iloc[j] <= exit_z:
+                    exit_idx = j
+                    exit_reason = "MEAN_REVERSION"
+                    break
+
+            best_return = max(best_return, current_return)
+            worst_return = min(worst_return, current_return)
+
+            if use_target_exit and current_return >= target_return:
+                exit_idx = j
+                exit_reason = "TARGET"
+                break
+
+        if exit_idx is None:
+            exit_idx = max_forward
+            exit_reason = "TIME_STOP"
+
+            p1_now = prices[ticker1].iloc[exit_idx]
+            p2_now = prices[ticker2].iloc[exit_idx]
+
+            ret1 = p1_now / p1_entry - 1
+            ret2 = p2_now / p2_entry - 1
+
+            current_return = (ret1 - hedge_ratio * ret2) if signal == "LONG_SPREAD" else (-ret1 + hedge_ratio * ret2)
+
+        gross_return = current_return
+        net_return = gross_return - transaction_cost
+
+        trades.append({
+            "entry_date": entry_date,
+            "exit_date": spread.index[exit_idx],
+            "signal": signal,
+            "entry_z": z_entry,
+            "exit_z": zscore.iloc[exit_idx],
+            "spread_entry": spread_entry,
+            "spread_exit": spread.iloc[exit_idx],
+            "days": exit_idx - entry_idx,
+            "gross_return": gross_return,
+            "net_return": net_return,
+            "best_return": best_return,
+            "worst_return": worst_return,
+            "exit_reason": exit_reason,
+            "bb_window": bb_window,
+            "entry_z_level": entry_z,
+            "max_trade_days": max_trade_days,
+        })
+
+        i = exit_idx + 1
+
+    trades = pd.DataFrame(trades)
+
+    if len(trades) == 0:
+        metrics = {
+            "bb_window": bb_window,
+            "entry_z": entry_z,
+            "signals": 0,
+            "winrate": None,
+            "avg_return": None,
+            "median_return": None,
+            "total_return": None,
+            "sharpe": None,
+            "max_drawdown": None,
+            "avg_days": None,
+            "score": -999,
+        }
+        return trades, metrics, rolling_mean, rolling_std, zscore
+
+    returns = trades["net_return"]
+    winrate = (returns > 0).mean()
+    avg_return = returns.mean()
+    median_return = returns.median()
+    total_return = (1 + returns).prod() - 1
+    sharpe = returns.mean() / returns.std() * np.sqrt(252 / max(trades["days"].mean(), 1)) if returns.std() != 0 else float("nan")
+    mdd = max_drawdown(returns)
+    avg_days = trades["days"].mean()
+
+    signal_penalty = 0 if len(trades) >= min_signals else -50
+    score = (
+        winrate * 100
+        + avg_return * 1000
+        + (0 if np.isnan(sharpe) else sharpe * 10)
+        + min(len(trades), 30)
+        + signal_penalty
+        + (0 if np.isnan(mdd) else mdd * 100)
+    )
+
+    metrics = {
+        "bb_window": bb_window,
+        "entry_z": entry_z,
+        "signals": len(trades),
+        "winrate": _safe_float(winrate),
+        "avg_return": _safe_float(avg_return),
+        "median_return": _safe_float(median_return),
+        "total_return": _safe_float(total_return),
+        "sharpe": _safe_float(sharpe),
+        "max_drawdown": _safe_float(mdd),
+        "avg_days": _safe_float(avg_days),
+        "score": _safe_float(score),
+    }
+
+    return trades, metrics, rolling_mean, rolling_std, zscore
+
+
+def analyze_robust_pair(
+    ticker1,
+    ticker2,
+    prices,
+    target_return=0.05,
+    use_target_exit=False,
+    transaction_cost=0.002,
+    min_signals=5,
+    max_half_life_filter=60,
+    windows_to_test=None,
+    stds_to_test=None,
+):
+    windows_to_test = windows_to_test or [10, 15, 20, 25, 30, 40, 50, 60]
+    stds_to_test = stds_to_test or [1.5, 1.75, 2.0, 2.25, 2.5]
+
+    pair_prices = prices[[ticker1, ticker2]].dropna()
+    if len(pair_prices) < 100:
+        return None
+
+    spread, hedge_ratio, alpha = calculate_hedge_ratio_and_spread(pair_prices, ticker1, ticker2)
+
+    s1 = pair_prices[ticker1]
+    s2 = pair_prices[ticker2]
+    corr_price = s1.corr(s2)
+    corr_returns = s1.pct_change().corr(s2.pct_change())
+
+    try:
+        adf_p = adfuller(spread.dropna())[1]
+    except Exception:
+        adf_p = float("nan")
+    try:
+        coint_p = coint(np.log(s1), np.log(s2))[1]
+    except Exception:
+        coint_p = float("nan")
+
+    half_life = calculate_half_life(spread)
+
+    results = []
+    all_backtests = {}
+
+    for w in windows_to_test:
+        for z in stds_to_test:
+            trades, metrics, rm, rs, zs = run_robust_backtest(
+                prices=pair_prices,
+                spread=spread,
+                ticker1=ticker1,
+                ticker2=ticker2,
+                hedge_ratio=hedge_ratio,
+                bb_window=int(w),
+                entry_z=float(z),
+                exit_z=0.0,
+                target_return=target_return,
+                use_target_exit=use_target_exit,
+                transaction_cost=transaction_cost,
+                min_signals=min_signals,
+            )
+            results.append(metrics)
+            all_backtests[(int(w), float(z))] = {
+                "trades": trades,
+                "rolling_mean": rm,
+                "rolling_std": rs,
+                "zscore": zs,
+            }
+
+    optimization = pd.DataFrame(results).sort_values("score", ascending=False)
+    if optimization.empty:
+        return None
+
+    best = optimization.iloc[0]
+    best_window = int(best["bb_window"])
+    best_entry_z = float(best["entry_z"])
+    best_data = all_backtests[(best_window, best_entry_z)]
+
+    trades = best_data["trades"]
+    rolling_mean = best_data["rolling_mean"]
+    rolling_std = best_data["rolling_std"]
+    zscore = best_data["zscore"]
+    upper_band = rolling_mean + best_entry_z * rolling_std
+    lower_band = rolling_mean - best_entry_z * rolling_std
+
+    z_now = zscore.dropna().iloc[-1] if not zscore.dropna().empty else float("nan")
+    if pd.notna(z_now) and z_now >= best_entry_z:
+        current_signal = "SHORT_SPREAD"
+    elif pd.notna(z_now) and z_now <= -best_entry_z:
+        current_signal = "LONG_SPREAD"
+    else:
+        current_signal = "SIN SEÑAL"
+
+    diagnostic = []
+    if _safe_float(coint_p) is not None and coint_p < 0.05:
+        diagnostic.append({"type": "good", "text": "Cointegration fuerte: par estadisticamente interesante."})
+    elif _safe_float(coint_p) is not None and coint_p < 0.10:
+        diagnostic.append({"type": "warn", "text": "Cointegration moderada: puede servir, con cuidado."})
+    else:
+        diagnostic.append({"type": "bad", "text": "No hay cointegration clara: par debil para mean reversion."})
+
+    if _safe_float(adf_p) is not None and adf_p < 0.05:
+        diagnostic.append({"type": "good", "text": "ADF: el spread parece estacionario."})
+    else:
+        diagnostic.append({"type": "warn", "text": "ADF: el spread no parece claramente estacionario."})
+
+    if np.isfinite(half_life) and half_life < max_half_life_filter:
+        diagnostic.append({"type": "good", "text": "Half-life razonable."})
+    else:
+        diagnostic.append({"type": "warn", "text": "Half-life lento o invalido."})
+
+    if len(trades) > 0 and best["signals"] < min_signals:
+        diagnostic.append({"type": "warn", "text": "Pocas señales: posible sobreoptimizacion."})
+
+    equity = []
+    if len(trades) > 0:
+        eq = (1 + trades["net_return"]).cumprod()
+        equity = [
+            {"date": row["exit_date"].strftime("%Y-%m-%d"), "equity": _safe_float(v)}
+            for (_, row), v in zip(trades.iterrows(), eq)
+        ]
+
+    trades_out = []
+    if len(trades) > 0:
+        for _, row in trades.iterrows():
+            trades_out.append({
+                "entry_date": row["entry_date"].strftime("%Y-%m-%d"),
+                "exit_date": row["exit_date"].strftime("%Y-%m-%d"),
+                "signal": row["signal"],
+                "entry_z": _safe_float(row["entry_z"]),
+                "exit_z": _safe_float(row["exit_z"]),
+                "days": int(row["days"]),
+                "gross_return": _safe_float(row["gross_return"]),
+                "net_return": _safe_float(row["net_return"]),
+                "best_return": _safe_float(row["best_return"]),
+                "worst_return": _safe_float(row["worst_return"]),
+                "exit_reason": row["exit_reason"],
+            })
+
+    optimization_out = [
+        {k: _safe_float(v) if isinstance(v, (float, np.floating)) else int(v) if isinstance(v, (int, np.integer)) else v for k, v in row.items()}
+        for row in optimization.head(10).to_dict("records")
+    ]
+
+    summary = {
+        "pair": f"{ticker1}/{ticker2}",
+        "ticker1": ticker1,
+        "ticker2": ticker2,
+        "hedge_ratio": _safe_float(hedge_ratio),
+        "alpha": _safe_float(alpha),
+        "corr_price": _safe_float(corr_price),
+        "corr_returns": _safe_float(corr_returns),
+        "adf_p": _safe_float(adf_p),
+        "coint_p": _safe_float(coint_p),
+        "half_life": _safe_float(half_life),
+        "best_window": best_window,
+        "best_entry_z": best_entry_z,
+        "signals": int(best["signals"]),
+        "winrate": _safe_float(best["winrate"]),
+        "avg_return": _safe_float(best["avg_return"]),
+        "median_return": _safe_float(best["median_return"]),
+        "total_return": _safe_float(best["total_return"]),
+        "sharpe": _safe_float(best["sharpe"]),
+        "max_drawdown": _safe_float(best["max_drawdown"]),
+        "avg_days": _safe_float(best["avg_days"]),
+        "score": _safe_float(best["score"]),
+        "zscore_now": _safe_float(z_now),
+        "spread_now": _safe_float(spread.iloc[-1]),
+        "current_signal": current_signal,
+        "p1_now": _safe_float(s1.iloc[-1]),
+        "p2_now": _safe_float(s2.iloc[-1]),
+        "ratio_now": _safe_float(s1.iloc[-1] / s2.iloc[-1]),
+        "target_return": target_return,
+        "window_days": best_window,
+    }
+
+    chart = {
+        "dates": [d.strftime("%Y-%m-%d") for d in spread.index],
+        "spread": [_safe_float(v) for v in spread.values],
+        "mean": [_safe_float(v) for v in rolling_mean.values],
+        "upper": [_safe_float(v) for v in upper_band.values],
+        "lower": [_safe_float(v) for v in lower_band.values],
+        "zscore": [_safe_float(v) for v in zscore.values],
+        "equity": equity,
+    }
+
+    return {
+        "summary": summary,
+        "diagnostic": diagnostic,
+        "optimization": optimization_out,
+        "trades": trades_out,
+        "chart": chart,
+    }
+
+
 # ========================================================================
 # DATA912 — live price cache (20s TTL since they update every 20s)
 # ========================================================================
@@ -501,6 +910,43 @@ def bollinger_pair(req: BollingerPairRequest):
         raise HTTPException(status_code=400, detail="Not enough history for Bollinger analysis.")
 
     return {"summary": summary, "signals": signals or [], "chart": chart}
+
+
+@app.post("/api/robust-pair")
+def robust_pair(req: RobustPairRequest):
+    t1 = req.ticker1.upper().strip()
+    t2 = req.ticker2.upper().strip()
+    if t1 == t2 or not t1 or not t2:
+        raise HTTPException(status_code=400, detail="Tickers must be different and non-empty.")
+    start_date = f"{req.start_year}-01-01"
+
+    prices = _download_prices([t1, t2], start_date)
+    if prices.empty:
+        raise HTTPException(status_code=400, detail="No price data returned.")
+
+    if isinstance(prices, pd.Series) or t1 not in prices.columns or t2 not in prices.columns:
+        raise HTTPException(status_code=400, detail="Ticker not found.")
+
+    prices = prices[[t1, t2]].dropna()
+    if len(prices) < 100:
+        raise HTTPException(status_code=400, detail="Need at least 100 observations for robust analysis.")
+
+    data = analyze_robust_pair(
+        ticker1=t1,
+        ticker2=t2,
+        prices=prices,
+        target_return=req.target_return,
+        use_target_exit=req.use_target_exit,
+        transaction_cost=req.transaction_cost,
+        min_signals=req.min_signals,
+        max_half_life_filter=req.max_half_life_filter,
+        windows_to_test=req.windows_to_test,
+        stds_to_test=req.stds_to_test,
+    )
+    if data is None:
+        raise HTTPException(status_code=400, detail="Pair could not be analyzed.")
+
+    return data
 
 
 @app.post("/api/screener")
