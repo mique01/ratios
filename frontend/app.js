@@ -14,9 +14,12 @@ document.getElementById('backend-host').textContent = BACKEND_URL;
 
 // ---------- watchlist storage --------------------------------------------
 const WATCH_KEY = 'ptt.watchlist.v1';
+const MONITOR_KEY = 'ptt.monitors.v1';
 function loadWatch()  { try { return JSON.parse(localStorage.getItem(WATCH_KEY)) || []; } catch { return []; } }
 function saveWatch(w) { localStorage.setItem(WATCH_KEY, JSON.stringify(w)); updateWatchCount(); }
-function updateWatchCount() { document.getElementById('watchlist-count').textContent = loadWatch().length; }
+function loadMonitors()  { try { return JSON.parse(localStorage.getItem(MONITOR_KEY)) || []; } catch { return []; } }
+function saveMonitors(w) { localStorage.setItem(MONITOR_KEY, JSON.stringify(w)); updateWatchCount(); }
+function updateWatchCount() { document.getElementById('watchlist-count').textContent = loadWatch().length + loadMonitors().length; }
 updateWatchCount();
 
 // ---------- clock --------------------------------------------------------
@@ -52,7 +55,9 @@ document.querySelectorAll('.tab').forEach(btn => {
     const id = btn.dataset.tab;
     document.getElementById(`tab-${id}`).classList.add('active');
     if (id === 'watchlist') {
+      renderMonitors();
       renderWatchlist();
+      refreshSavedPairs(false);
       refreshLivePrices();
     }
   });
@@ -63,6 +68,9 @@ const fmtPct = v => (v === null || v === undefined || isNaN(v)) ? '—' : (v * 1
 const fmtNum = (v, d = 3) => (v === null || v === undefined || isNaN(v)) ? '—' : Number(v).toFixed(d);
 const fmtMoney = v => (v === null || v === undefined || isNaN(v)) ? '—' : '$' + Number(v).toFixed(2);
 const parseDecimal = value => parseFloat(String(value).replace(',', '.'));
+const isNoSignal = value => !value || String(value).toUpperCase().startsWith('SIN SE');
+const hasActiveSignal = value => !isNoSignal(value);
+const modelLabel = value => value === 'ROBUST_OLS' ? 'ROBUST OLS' : 'RATIO';
 
 function setMsg(id, text, cls = '') {
   const el = document.getElementById(id);
@@ -137,8 +145,10 @@ async function runSingle() {
 
   const btn = document.getElementById('run-single');
   const addBtn = document.getElementById('add-watch-single');
+  const saveBtn = document.getElementById('save-monitor-single');
   btn.disabled = true; btn.textContent = '⏳ RUNNING…';
   addBtn.disabled = true;
+  saveBtn.disabled = true;
   setMsg('single-msg', `ANALYZING ${t1}/${t2} FROM ${startYear}…`);
   setFooter(`SINGLE-PAIR: ${t1}/${t2}`);
 
@@ -155,7 +165,8 @@ async function runSingle() {
     const data = await r.json();
     lastSingleSummary = { ...data.summary, window_days: windowDays, target_return: targetRet };
     renderSingle(data, t1, t2);
-    addBtn.disabled = lastSingleSummary.current_signal === 'SIN SEÑAL';
+    addBtn.disabled = !hasActiveSignal(lastSingleSummary.current_signal);
+    saveBtn.disabled = false;
     setMsg('single-msg', `✓ ${t1}/${t2} ANALYZED · ${data.signals.length} HISTORICAL SIGNALS`, 'ok');
   } catch (e) {
     setMsg('single-msg', `✗ ERROR · ${e.message}`, 'err');
@@ -266,6 +277,18 @@ document.getElementById('add-watch-single').addEventListener('click', () => {
   if (!lastSingleSummary) return;
   addToWatchlist(lastSingleSummary);
   setMsg('single-msg', `✓ ADDED ${lastSingleSummary.pair} TO WATCHLIST`, 'ok');
+});
+
+document.getElementById('save-monitor-single').addEventListener('click', () => {
+  if (!lastSingleSummary) return;
+  addMonitorPair({
+    ...lastSingleSummary,
+    model_type: 'RATIO',
+    start_year: parseInt(document.getElementById('start-year').value, 10),
+    window_days: parseInt(document.getElementById('window-days').value, 10),
+    target_return: parseDecimal(document.getElementById('target-return').value),
+  });
+  setMsg('single-msg', `SAVED ${lastSingleSummary.pair} FOR SIGNAL MONITOR`, 'ok');
 });
 
 // ============================================================
@@ -429,8 +452,10 @@ async function runRobust() {
 
   const btn = document.getElementById('run-robust');
   const addBtn = document.getElementById('add-watch-robust');
+  const saveBtn = document.getElementById('save-monitor-robust');
   btn.disabled = true; btn.textContent = 'RUNNING...';
   addBtn.disabled = true;
+  saveBtn.disabled = true;
   setMsg('robust-msg', `RUNNING ROBUST OLS BACKTEST ${t1}/${t2} FROM ${startYear}...`);
   setFooter(`ROBUST: ${t1}/${t2}`);
 
@@ -455,7 +480,8 @@ async function runRobust() {
     const data = await r.json();
     lastRobustSummary = data.summary;
     renderRobust(data, t1, t2);
-    addBtn.disabled = lastRobustSummary.current_signal === 'SIN SEÑAL';
+    addBtn.disabled = !hasActiveSignal(lastRobustSummary.current_signal);
+    saveBtn.disabled = false;
     setMsg('robust-msg', `OK ${t1}/${t2} ROBUST ANALYZED · ${data.trades.length} TRADES · BEST W${data.summary.best_window}/Z${data.summary.best_entry_z}`, 'ok');
   } catch (e) {
     setMsg('robust-msg', `ERROR · ${e.message}`, 'err');
@@ -613,6 +639,19 @@ document.getElementById('add-watch-robust').addEventListener('click', () => {
   addToWatchlist({ ...lastRobustSummary, model_type: 'ROBUST_OLS' });
   setMsg('robust-msg', `OK ADDED ${lastRobustSummary.pair} TO WATCHLIST`, 'ok');
 });
+document.getElementById('save-monitor-robust').addEventListener('click', () => {
+  if (!lastRobustSummary) return;
+  addMonitorPair({
+    ...lastRobustSummary,
+    model_type: 'ROBUST_OLS',
+    start_year: parseInt(document.getElementById('r-start-year').value, 10),
+    target_return: parseDecimal(document.getElementById('r-target').value),
+    transaction_cost: parseDecimal(document.getElementById('r-cost').value),
+    min_signals: parseInt(document.getElementById('r-minsig').value, 10),
+    use_target_exit: document.getElementById('r-use-target').checked,
+  });
+  setMsg('robust-msg', `OK SAVED ${lastRobustSummary.pair} FOR SIGNAL MONITOR`, 'ok');
+});
 bindResetZoom('reset-robust-spread-zoom', () => robustSpreadChart);
 bindResetZoom('reset-robust-z-zoom', () => robustZChart);
 bindResetZoom('reset-robust-equity-zoom', () => robustEquityChart);
@@ -668,7 +707,7 @@ async function runScreener() {
 function renderScreener() {
   const sig = document.getElementById('sc-signal').value;
   let rows = screenerResults.slice();
-  if (sig === 'ACTIVE')     rows = rows.filter(r => r.current_signal !== 'SIN SEÑAL');
+  if (sig === 'ACTIVE')     rows = rows.filter(r => hasActiveSignal(r.current_signal));
   else if (sig === 'LONG')  rows = rows.filter(r => r.current_signal.startsWith('LONG'));
   else if (sig === 'SHORT') rows = rows.filter(r => r.current_signal.startsWith('SHORT'));
 
@@ -686,8 +725,8 @@ function renderScreener() {
     const adfCls = r.adf_p < 0.05 ? 'good' : r.adf_p < 0.10 ? 'warn' : 'bad';
     const coinCls = r.coint_p < 0.05 ? 'good' : r.coint_p < 0.10 ? 'warn' : 'bad';
 
-    const canWatch = r.current_signal !== 'SIN SEÑAL';
-    const btnTxt = canWatch ? '＋ WATCH' : '—';
+    const canWatch = hasActiveSignal(r.current_signal);
+    const btnTxt = canWatch ? '＋ WATCH' : 'SAVE';
 
     return `<tr>
       <td class="dim">${String(i + 1).padStart(2, '0')}</td>
@@ -702,7 +741,7 @@ function renderScreener() {
       <td class="num dim">${r.half_life === null ? '∞' : fmtNum(r.half_life, 0)}</td>
       <td><span class="signal-badge ${sigCls}">${r.current_signal}</span></td>
       <td class="num warn">${fmtNum(r.score, 4)}</td>
-      <td>${canWatch ? `<button class="btn-row" data-idx="${i}">${btnTxt}</button>` : '<span class="dim">—</span>'}</td>
+      <td><button class="btn-row" data-idx="${i}" data-action="${canWatch ? 'watch' : 'monitor'}">${btnTxt}</button></td>
     </tr>`;
   }).join('');
 
@@ -710,18 +749,251 @@ function renderScreener() {
     btn.addEventListener('click', () => {
       const idx = parseInt(btn.dataset.idx, 10);
       const row = rows[idx];
-      addToWatchlist({
+      const payload = {
         ...row,
-        window_days:   parseInt(document.getElementById('sc-window').value, 10),
+        model_type: 'RATIO',
+        start_year: parseInt(document.getElementById('sc-start-year').value, 10),
+        window_days: parseInt(document.getElementById('sc-window').value, 10),
         target_return: parseDecimal(document.getElementById('sc-target').value),
-      });
-      btn.textContent = '✓ ADDED'; btn.classList.add('added'); btn.disabled = true;
+      };
+      if (btn.dataset.action === 'watch') addToWatchlist(payload);
+      else addMonitorPair(payload);
+      btn.textContent = 'ADDED'; btn.classList.add('added'); btn.disabled = true;
     });
   });
 }
 
 document.getElementById('run-screener').addEventListener('click', runScreener);
 document.getElementById('sc-signal').addEventListener('change', renderScreener);
+
+// ============================================================
+// SAVED PAIR MONITOR
+// ============================================================
+
+function monitorId(ticker1, ticker2, modelType) {
+  return `${modelType || 'RATIO'}:${ticker1}/${ticker2}`;
+}
+
+function addMonitorPair(s) {
+  const ticker1 = (s.ticker1 || '').toUpperCase().trim();
+  const ticker2 = (s.ticker2 || '').toUpperCase().trim();
+  if (!ticker1 || !ticker2 || ticker1 === ticker2) return false;
+
+  const modelType = s.model_type || 'RATIO';
+  const pair = `${ticker1}/${ticker2}`;
+  const id = monitorId(ticker1, ticker2, modelType);
+  const list = loadMonitors();
+  const existingIdx = list.findIndex(item => item.id === id);
+  const item = {
+    id,
+    pair,
+    ticker1,
+    ticker2,
+    model_type: modelType,
+    start_year: s.start_year ?? 2022,
+    window_days: s.window_days ?? s.best_window ?? 30,
+    target_return: s.target_return ?? 0.05,
+    transaction_cost: s.transaction_cost ?? 0.002,
+    min_signals: s.min_signals ?? 5,
+    use_target_exit: s.use_target_exit ?? false,
+    saved_at: list[existingIdx]?.saved_at || new Date().toISOString(),
+    last_scan: s.last_scan || null,
+    last_error: null,
+    last_summary: s.current_signal ? { ...s, model_type: modelType } : list[existingIdx]?.last_summary || null,
+  };
+
+  if (existingIdx >= 0) list[existingIdx] = { ...list[existingIdx], ...item };
+  else list.push(item);
+
+  saveMonitors(list);
+  renderMonitors();
+  return true;
+}
+
+function removeMonitor(id) {
+  saveMonitors(loadMonitors().filter(item => item.id !== id));
+  renderMonitors();
+}
+
+function monitorSummary(item) {
+  return item.last_summary || {};
+}
+
+function monitorCurrentSignal(item) {
+  return monitorSummary(item).current_signal || 'SIN SEÑAL';
+}
+
+function monitorHasSignal(item) {
+  return hasActiveSignal(monitorCurrentSignal(item));
+}
+
+async function scanMonitor(item) {
+  const endpoint = item.model_type === 'ROBUST_OLS' ? '/api/robust-pair' : '/api/single-pair';
+  const payload = item.model_type === 'ROBUST_OLS'
+    ? {
+        ticker1: item.ticker1,
+        ticker2: item.ticker2,
+        start_year: item.start_year,
+        target_return: item.target_return,
+        transaction_cost: item.transaction_cost,
+        min_signals: item.min_signals,
+        use_target_exit: item.use_target_exit,
+      }
+    : {
+        ticker1: item.ticker1,
+        ticker2: item.ticker2,
+        start_year: item.start_year,
+        window_days: item.window_days,
+        target_return: item.target_return,
+      };
+
+  const r = await fetch(`${BACKEND_URL}${endpoint}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || `HTTP ${r.status}`);
+  }
+
+  const data = await r.json();
+  return {
+    ...item,
+    last_scan: new Date().toISOString(),
+    last_error: null,
+    last_summary: { ...data.summary, model_type: item.model_type },
+  };
+}
+
+async function refreshSavedPairs(force = true) {
+  const list = loadMonitors();
+  if (list.length === 0) {
+    renderMonitors();
+    return;
+  }
+
+  const btn = document.getElementById('refresh-monitors');
+  if (btn) { btn.disabled = true; btn.textContent = 'SCANNING...'; }
+  setMsg('watch-msg', `SCANNING ${list.length} SAVED PAIRS...`);
+  setFooter(`MONITOR: ${list.length} PAIRS`);
+
+  const now = Date.now();
+  const minAgeMs = 15 * 60 * 1000;
+  const updated = [];
+  let scanned = 0;
+  let signals = 0;
+
+  for (const item of list) {
+    const last = item.last_scan ? new Date(item.last_scan).getTime() : 0;
+    if (!force && last && now - last < minAgeMs) {
+      updated.push(item);
+      if (monitorHasSignal(item)) signals += 1;
+      continue;
+    }
+
+    try {
+      const next = await scanMonitor(item);
+      scanned += 1;
+      if (monitorHasSignal(next)) signals += 1;
+      updated.push(next);
+    } catch (e) {
+      updated.push({ ...item, last_scan: new Date().toISOString(), last_error: e.message });
+    }
+  }
+
+  saveMonitors(updated);
+  renderMonitors();
+  setMsg('watch-msg', `OK SCANNED ${scanned} SAVED PAIRS · ${signals} ACTIVE SIGNALS`, signals ? 'ok' : '');
+  setFooter('IDLE');
+  if (btn) { btn.disabled = false; btn.textContent = 'SCAN SAVED PAIRS'; }
+}
+
+function renderMonitors() {
+  const tbody = document.querySelector('#monitor-table tbody');
+  if (!tbody) return;
+
+  const list = loadMonitors().slice().sort((a, b) => {
+    const aSig = monitorHasSignal(a) ? 1 : 0;
+    const bSig = monitorHasSignal(b) ? 1 : 0;
+    if (aSig !== bSig) return bSig - aSig;
+    return new Date(b.last_scan || b.saved_at) - new Date(a.last_scan || a.saved_at);
+  });
+
+  if (list.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="13" class="empty">— NO PAIRS SAVED · SAVE FROM ANALYSIS OR ADD HERE —</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = list.map(item => {
+    const s = monitorSummary(item);
+    const current = monitorCurrentSignal(item);
+    const sigCls = current.startsWith('LONG') ? 'long' : current.startsWith('SHORT') ? 'short' : 'none';
+    const ratioOrZ = item.model_type === 'ROBUST_OLS' ? fmtNum(s.zscore_now, 2) : fmtNum(s.ratio_now, 4);
+    const win = item.model_type === 'ROBUST_OLS' ? s.winrate : s.winrate_5pct_30d;
+    const avg = item.model_type === 'ROBUST_OLS' ? s.total_return : s.avg_return_30d;
+    const action = monitorHasSignal(item)
+      ? `<button class="btn-row" data-action="open-monitor" data-id="${item.id}">OPEN</button>`
+      : '<span class="dim">WAIT</span>';
+    const error = item.last_error ? `<span class="signal-badge miss" title="${item.last_error}">ERROR</span>` : '';
+
+    return `<tr>
+      <td class="dim">${item.saved_at.slice(0, 10)}</td>
+      <td><strong>${item.pair}</strong></td>
+      <td class="dim">${modelLabel(item.model_type)}</td>
+      <td class="dim">${item.last_scan ? new Date(item.last_scan).toLocaleString() : '—'} ${error}</td>
+      <td><span class="signal-badge ${sigCls}">${current}</span></td>
+      <td class="num">${ratioOrZ}</td>
+      <td class="num ${s.adf_p < 0.05 ? 'good' : s.adf_p < 0.10 ? 'warn' : 'bad'}">${fmtNum(s.adf_p, 3)}</td>
+      <td class="num ${s.coint_p < 0.05 ? 'good' : s.coint_p < 0.10 ? 'warn' : 'bad'}">${fmtNum(s.coint_p, 3)}</td>
+      <td class="num dim">${s.half_life === null ? '∞' : fmtNum(s.half_life, 0)}</td>
+      <td class="num">${fmtPct(win)}</td>
+      <td class="num">${fmtPct(avg)}</td>
+      <td>${action}</td>
+      <td><button class="btn-row" data-action="remove-monitor" data-id="${item.id}">✕</button></td>
+    </tr>`;
+  }).join('');
+
+  tbody.querySelectorAll('button[data-action="remove-monitor"]').forEach(btn => {
+    btn.addEventListener('click', () => removeMonitor(btn.dataset.id));
+  });
+
+  tbody.querySelectorAll('button[data-action="open-monitor"]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const item = loadMonitors().find(m => m.id === btn.dataset.id);
+      if (!item?.last_summary) return;
+      addToWatchlist({
+        ...item.last_summary,
+        model_type: item.model_type,
+        target_return: item.target_return,
+        window_days: item.window_days,
+      });
+      btn.textContent = 'ADDED';
+      btn.disabled = true;
+      btn.classList.add('added');
+      setMsg('watch-msg', `OK OPENED ${item.pair} FROM SAVED PAIRS`, 'ok');
+    });
+  });
+}
+
+function addManualMonitor() {
+  const ticker1 = document.getElementById('mon-t1').value.toUpperCase().trim();
+  const ticker2 = document.getElementById('mon-t2').value.toUpperCase().trim();
+  if (!ticker1 || !ticker2 || ticker1 === ticker2) {
+    setMsg('watch-msg', 'TICKERS MUST BE DIFFERENT & NON-EMPTY', 'err');
+    return;
+  }
+
+  addMonitorPair({
+    ticker1,
+    ticker2,
+    model_type: document.getElementById('mon-model').value,
+    start_year: parseInt(document.getElementById('mon-start-year').value, 10),
+    target_return: 0.05,
+    window_days: 30,
+  });
+  setMsg('watch-msg', `OK SAVED ${ticker1}/${ticker2}`, 'ok');
+}
 
 // ============================================================
 // WATCHLIST
@@ -851,8 +1123,10 @@ let livePrices = {};   // { TICKER: { c, pct_change } }
 let prevPrices = {};
 let pollTimer = null;
 let countdownTimer = null;
+let monitorTimer = null;
 let secondsLeft = 0;
 const POLL_INTERVAL = 25; // seconds
+const MONITOR_INTERVAL = 15 * 60; // seconds
 
 async function refreshLivePrices() {
   const list = loadWatch();
@@ -899,7 +1173,10 @@ function startPolling() {
   if (pollTimer) return;
   secondsLeft = POLL_INTERVAL;
   refreshLivePrices();
+  renderMonitors();
+  refreshSavedPairs(false);
   pollTimer = setInterval(refreshLivePrices, POLL_INTERVAL * 1000);
+  monitorTimer = setInterval(() => refreshSavedPairs(false), MONITOR_INTERVAL * 1000);
   countdownTimer = setInterval(() => {
     if (secondsLeft > 0) secondsLeft -= 1;
     const el = document.getElementById('refresh-countdown');
@@ -908,6 +1185,7 @@ function startPolling() {
 }
 function stopPolling() {
   if (pollTimer)      { clearInterval(pollTimer);      pollTimer = null; }
+  if (monitorTimer)   { clearInterval(monitorTimer);   monitorTimer = null; }
   if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
 }
 
@@ -920,13 +1198,21 @@ document.querySelectorAll('.tab').forEach(btn => {
 });
 
 document.getElementById('refresh-now').addEventListener('click', refreshLivePrices);
+document.getElementById('refresh-monitors').addEventListener('click', () => refreshSavedPairs(true));
+document.getElementById('save-monitor-manual').addEventListener('click', addManualMonitor);
 document.getElementById('clear-watch').addEventListener('click', () => {
   if (!confirm('Clear entire watchlist?')) return;
-  saveWatch([]); renderWatchlist();
+  saveWatch([]);
+  saveMonitors([]);
+  renderMonitors();
+  renderWatchlist();
 });
 
 document.getElementById('export-watch').addEventListener('click', () => {
-  const blob = new Blob([JSON.stringify(loadWatch(), null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({
+    active_signals: loadWatch(),
+    saved_pairs: loadMonitors(),
+  }, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -944,9 +1230,17 @@ document.getElementById('import-file').addEventListener('change', e => {
   reader.onload = () => {
     try {
       const parsed = JSON.parse(reader.result);
-      if (!Array.isArray(parsed)) throw new Error('not an array');
-      saveWatch(parsed); renderWatchlist();
-      setMsg('watch-msg', `✓ IMPORTED ${parsed.length} ITEMS`, 'ok');
+      if (Array.isArray(parsed)) {
+        saveWatch(parsed);
+        setMsg('watch-msg', `IMPORTED ${parsed.length} ACTIVE SIGNALS`, 'ok');
+      } else {
+        if (!Array.isArray(parsed.active_signals) || !Array.isArray(parsed.saved_pairs)) throw new Error('invalid export format');
+        saveWatch(parsed.active_signals);
+        saveMonitors(parsed.saved_pairs);
+        setMsg('watch-msg', `IMPORTED ${parsed.active_signals.length} SIGNALS · ${parsed.saved_pairs.length} SAVED PAIRS`, 'ok');
+      }
+      renderMonitors();
+      renderWatchlist();
     } catch (err) {
       setMsg('watch-msg', `✗ INVALID JSON · ${err.message}`, 'err');
     }

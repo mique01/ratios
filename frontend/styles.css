@@ -356,6 +356,7 @@ body {
 /* ---------------- screener / watchlist layout ---------------- */
 .screener-controls { margin-bottom: 12px; }
 .screener-table .table-wrap { max-height: calc(100vh - 280px); }
+.monitor-table { margin-bottom: 12px; }
 
 /* ---------------- footer ---------------- */
 .bottom-bar {

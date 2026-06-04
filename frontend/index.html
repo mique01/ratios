@@ -49,6 +49,7 @@
         <label><span>TARGET RET</span>   <input id="target-return" type="number" value="0.05" step="0.01" min="0.01" max="0.5" /></label>
         <button id="run-single" class="btn-run">▶ RUN ANALYSIS</button>
         <button id="add-watch-single" class="btn-ghost" disabled>＋ ADD TO WATCHLIST</button>
+        <button id="save-monitor-single" class="btn-ghost" disabled>SAVE PAIR</button>
         <div id="single-msg" class="msg"></div>
       </div>
     </div>
@@ -163,6 +164,7 @@
         <label class="check-row"><input id="r-use-target" type="checkbox" /> <span>EXIT ON TARGET</span></label>
         <button id="run-robust" class="btn-run">RUN ROBUST</button>
         <button id="add-watch-robust" class="btn-ghost" disabled>ADD TO WATCHLIST</button>
+        <button id="save-monitor-robust" class="btn-ghost" disabled>SAVE PAIR</button>
         <div id="robust-msg" class="msg"></div>
       </div>
     </div>
@@ -287,6 +289,17 @@
   <div class="screener-controls panel">
     <div class="panel-head">▌ LIVE WATCHLIST · DATA912 REAL-TIME FEED (20s)</div>
     <div class="panel-body form-inline">
+      <label><span>TICKER 1</span><input id="mon-t1" type="text" value="KO" maxlength="6" /></label>
+      <label><span>TICKER 2</span><input id="mon-t2" type="text" value="PEP" maxlength="6" /></label>
+      <label><span>START YEAR</span><input id="mon-start-year" type="number" value="2022" min="2000" max="2026" /></label>
+      <label class="select-all"><span>MODEL</span>
+        <select id="mon-model">
+          <option value="RATIO">RATIO</option>
+          <option value="ROBUST_OLS">ROBUST OLS</option>
+        </select>
+      </label>
+      <button id="save-monitor-manual" class="btn-ghost">SAVE PAIR</button>
+      <button id="refresh-monitors" class="btn-ghost">SCAN SAVED PAIRS</button>
       <span class="info-pill">REFRESH: <span id="refresh-countdown">—</span>s</span>
       <span class="info-pill">LAST UPDATE: <span id="last-update">—</span></span>
       <span class="info-pill">SOURCE: <a href="https://data912.com/live/usa_stocks" target="_blank" rel="noopener">data912.com</a></span>
@@ -296,6 +309,21 @@
       <input type="file" id="import-file" accept=".json" style="display:none" />
       <button id="clear-watch" class="btn-ghost btn-danger">✕ CLEAR ALL</button>
       <div id="watch-msg" class="msg"></div>
+    </div>
+  </div>
+
+  <div class="panel panel-table screener-table monitor-table">
+    <div class="panel-head">▌ SAVED PAIRS · SIGNAL MONITOR</div>
+    <div class="panel-body table-wrap">
+      <table class="data-table" id="monitor-table">
+        <thead>
+          <tr>
+            <th>SAVED</th><th>PAIR</th><th>MODEL</th><th>LAST SCAN</th><th>CURRENT</th>
+            <th>RATIO/Z</th><th>ADF p</th><th>COINT p</th><th>HL</th><th>WIN%</th><th>AVG/TOTAL</th><th>ACTION</th><th></th>
+          </tr>
+        </thead>
+        <tbody><tr><td colspan="13" class="empty">— NO PAIRS SAVED · SAVE FROM ANALYSIS OR ADD HERE —</td></tr></tbody>
+      </table>
     </div>
   </div>
 
