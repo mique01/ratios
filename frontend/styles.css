@@ -172,10 +172,11 @@ body {
 
 .grid-robust {
   grid-template-columns: 280px 1fr 1fr;
-  grid-template-rows: auto 360px auto auto;
+  grid-template-rows: auto 360px auto auto auto;
   grid-template-areas:
     "form stats stats"
     "spread spread zchart"
+    "plan plan trades"
     "opt opt trades"
     "equity equity equity";
 }
@@ -183,6 +184,7 @@ body {
 .grid-robust > .panel:nth-child(2) { grid-area: stats; }
 .grid-robust .robust-spread { grid-area: spread; height: 360px; }
 .grid-robust .robust-z { grid-area: zchart; height: 360px; }
+.grid-robust .robust-plan { grid-area: plan; }
 .grid-robust .robust-opt { grid-area: opt; }
 .grid-robust .robust-trades { grid-area: trades; }
 .grid-robust .robust-equity { grid-area: equity; height: 300px; }
@@ -376,7 +378,7 @@ body {
   .grid-robust {
     grid-template-columns: 1fr;
     grid-template-rows: auto;
-    grid-template-areas: "form" "stats" "spread" "zchart" "opt" "trades" "equity";
+    grid-template-areas: "form" "stats" "spread" "zchart" "plan" "opt" "trades" "equity";
   }
   .stat-grid { grid-template-columns: repeat(2, 1fr); }
   .brand-build { display: none; }

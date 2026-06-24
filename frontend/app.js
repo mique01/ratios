@@ -436,6 +436,41 @@ let robustSpreadChart = null;
 let robustZChart = null;
 let robustEquityChart = null;
 let lastRobustSummary = null;
+let lastRobustTradePlan = null;
+
+function robustTradePrefs() {
+  return {
+    trade_mode: document.getElementById('r-trade-mode').value,
+    usd_per_leg: parseDecimal(document.getElementById('r-usd-leg').value),
+    target_dte: parseInt(document.getElementById('r-target-dte').value, 10),
+  };
+}
+
+async function loadRobustTradePlan(summary) {
+  const prefs = robustTradePrefs();
+  if (!hasActiveSignal(summary.current_signal)) return null;
+
+  const r = await fetch(`${BACKEND_URL}/api/trade-plan`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      ticker1: summary.ticker1,
+      ticker2: summary.ticker2,
+      current_signal: summary.current_signal,
+      p1_now: summary.p1_now,
+      p2_now: summary.p2_now,
+      trade_mode: prefs.trade_mode,
+      usd_per_leg: prefs.usd_per_leg,
+      target_dte: prefs.target_dte,
+    })
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || `HTTP ${r.status}`);
+  }
+  const data = await r.json();
+  return { ...data, prefs };
+}
 
 async function runRobust() {
   const t1 = document.getElementById('r-t1').value.toUpperCase().trim();
@@ -480,6 +515,12 @@ async function runRobust() {
     }
     const data = await r.json();
     lastRobustSummary = data.summary;
+    try {
+      lastRobustTradePlan = await loadRobustTradePlan(data.summary);
+    } catch (planErr) {
+      lastRobustTradePlan = null;
+      setMsg('robust-msg', `PLAN ERROR · ${planErr.message}`, 'err');
+    }
     renderRobust(data, t1, t2);
     addBtn.disabled = !hasActiveSignal(lastRobustSummary.current_signal);
     saveBtn.disabled = false;
@@ -521,6 +562,7 @@ function renderRobust(data, t1, t2) {
   renderRobustEquityChart(data.chart, t1, t2);
   renderRobustOptimization(data.optimization);
   renderRobustTrades(data.trades);
+  renderRobustTradePlan(lastRobustTradePlan);
 }
 
 function renderRobustSpreadChart(chart, t1, t2) {
@@ -634,6 +676,46 @@ function renderRobustTrades(trades) {
   }).join('');
 }
 
+function renderRobustTradePlan(planData) {
+  const tbody = document.querySelector('#robust-plan-table tbody');
+  if (!tbody) return;
+
+  if (!planData || !planData.plan?.legs?.length) {
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">- NO ACTIVE SIGNAL / NO TRADE PLAN -</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = planData.plan.legs.map((leg, idx) => {
+    const detail = planData.trade_mode === 'OPTIONS'
+      ? `${leg.option_type} ${fmtNum(leg.strike, 2)} ${leg.expiry} · ${leg.days_to_expiry}DTE · x${leg.contracts}`
+      : `${leg.direction} ${fmtNum(leg.shares, 3)} shares`;
+    const notional = planData.trade_mode === 'OPTIONS'
+      ? fmtMoney(leg.entry_cost)
+      : fmtMoney(leg.entry_notional);
+
+    return `<tr>
+      <td>LEG ${idx + 1}</td>
+      <td><strong>${leg.ticker}</strong>${planData.trade_mode === 'OPTIONS' ? `<div class="dim">${leg.contract_symbol}</div>` : ''}</td>
+      <td><span class="signal-badge ${leg.direction === 'SHORT' || leg.option_type === 'PUT' ? 'short' : 'long'}">${leg.action}</span></td>
+      <td class="dim">${detail}</td>
+      <td class="num">${fmtMoney(leg.entry_price)}</td>
+      <td class="num">${notional}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function refreshRobustTradePlanFromControls() {
+  if (!lastRobustSummary) return;
+  try {
+    lastRobustTradePlan = await loadRobustTradePlan(lastRobustSummary);
+    renderRobustTradePlan(lastRobustTradePlan);
+  } catch (e) {
+    lastRobustTradePlan = null;
+    renderRobustTradePlan(null);
+    setMsg('robust-msg', `PLAN ERROR · ${e.message}`, 'err');
+  }
+}
+
 document.getElementById('run-robust').addEventListener('click', runRobust);
 document.getElementById('add-watch-robust').addEventListener('click', async () => {
   if (!lastRobustSummary) return;
@@ -656,6 +738,9 @@ document.getElementById('save-monitor-robust').addEventListener('click', () => {
 bindResetZoom('reset-robust-spread-zoom', () => robustSpreadChart);
 bindResetZoom('reset-robust-z-zoom', () => robustZChart);
 bindResetZoom('reset-robust-equity-zoom', () => robustEquityChart);
+['r-trade-mode', 'r-usd-leg', 'r-target-dte'].forEach(id => {
+  document.getElementById(id).addEventListener('change', refreshRobustTradePlanFromControls);
+});
 
 // ============================================================
 // SCREENER
@@ -1129,6 +1214,161 @@ let secondsLeft = 0;
 const POLL_INTERVAL = 25; // seconds
 const MONITOR_INTERVAL = 15 * 60; // seconds
 
+async function refreshLivePricesLegacyUnused() {
+  const list = loadWatch();
+  if (list.length === 0) {
+    document.getElementById('last-update').textContent = '—';
+    return;
+  }
+  const symbols = [...new Set(list.flatMap(w => [w.ticker1, w.ticker2]))].join(',');
+
+  try {
+    const r = await fetch(`${BACKEND_URL}/api/live-prices?symbols=${encodeURIComponent(symbols)}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    prevPrices = livePrices;
+    livePrices = data.prices || {};
+    document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+    setMsg('watch-msg', `✓ LIVE FEED OK · ${Object.keys(livePrices).length} SYMBOLS`, 'ok');
+    renderWatchlist();
+    flashChangedPrices();
+  } catch (e) {
+    setMsg('watch-msg', `✗ LIVE FEED ERROR · ${e.message}`, 'err');
+  }
+  secondsLeft = POLL_INTERVAL;
+}
+
+function flashChangedPricesLegacyUnused() {
+  // For each watch row, find its ticker and flash if price changed
+  loadWatch().forEach(item => {
+    [['ticker1', `p1-${item.id}`], ['ticker2', `p2-${item.id}`]].forEach(([tKey, cellKey]) => {
+      const sym = item[tKey];
+      const prev = prevPrices[sym]?.c;
+      const curr = livePrices[sym]?.c;
+      if (prev == null || curr == null || prev === curr) return;
+      const el = document.querySelector(`[data-key="${cellKey}"]`);
+      if (!el) return;
+      el.classList.remove('flash-up', 'flash-down');
+      void el.offsetWidth; // restart animation
+      el.classList.add(curr > prev ? 'flash-up' : 'flash-down');
+    });
+  });
+}
+
+function addToWatchlist(s) {
+  const list = loadWatch();
+  const opened = new Date().toISOString();
+  const signalText = s.current_signal || '';
+  const item = {
+    id: `${s.pair}@${opened}`,
+    pair: s.pair,
+    ticker1: s.ticker1, ticker2: s.ticker2,
+    side:  signalText.startsWith('LONG') ? 'LONG' : 'SHORT',
+    level: signalText.replace(/(LONG|SHORT)[\s_]+/, '').replace('_SPREAD', ' SPREAD'),
+    model_type: s.model_type || 'RATIO',
+    hedge_ratio: s.hedge_ratio ?? 1,
+    opened,
+    entry_p1:    s.p1_now,
+    entry_p2:    s.p2_now,
+    entry_ratio: s.ratio_now,
+    target_return: s.target_return ?? 0.05,
+    window_days:   s.window_days   ?? 30,
+    max_pnl: 0, hit_target: false, closed: false,
+    median: s.median,
+  };
+  if (list.find(w => w.pair === item.pair && Math.abs(new Date(w.opened) - new Date(item.opened)) < 60000)) return;
+  list.push(item);
+  saveWatch(list);
+  renderWatchlist();
+}
+
+function removeFromWatchlist(id) {
+  saveWatch(loadWatch().filter(w => w.id !== id));
+  renderWatchlist();
+}
+
+function computePnL(item, p1Now, p2Now) {
+  if (p1Now == null || p2Now == null || !item.entry_p1 || !item.entry_p2) return null;
+  const hedgeRatio = item.hedge_ratio ?? 1;
+  const r1 = p1Now / item.entry_p1 - 1;
+  const r2 = p2Now / item.entry_p2 - 1;
+  return item.side === 'LONG' ? (r1 - hedgeRatio * r2) : (-r1 + hedgeRatio * r2);
+}
+
+function renderWatchlist() {
+  const list = loadWatch();
+  const tbody = document.querySelector('#watch-table tbody');
+  if (list.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="13" class="empty">— NO SIGNALS WATCHED · ADD FROM SINGLE-PAIR OR SCREENER —</td></tr>';
+    return;
+  }
+
+  // sort: open first (newest first), then closed
+  const sorted = list.slice().sort((a, b) => {
+    if (a.closed !== b.closed) return a.closed ? 1 : -1;
+    return new Date(b.opened) - new Date(a.opened);
+  });
+
+  tbody.innerHTML = sorted.map(item => {
+    const lp = livePrices[item.ticker1];
+    const rp = livePrices[item.ticker2];
+    const p1Now = lp?.c ?? null;
+    const p2Now = rp?.c ?? null;
+    const pnl = computePnL(item, p1Now, p2Now);
+    const ratioNow = (p1Now != null && p2Now != null) ? (p1Now / p2Now) : null;
+
+    const pnlCls = pnl == null ? 'dim' : pnl > 0 ? 'good' : 'bad';
+    const sideCls = item.side === 'LONG' ? 'long' : 'short';
+    const days = daysSince(item.opened);
+    const expired = days >= item.window_days;
+    const hit = pnl != null && pnl >= item.target_return;
+
+    let statusCls = 'open', statusTxt = 'OPEN';
+    if (item.closed)      { statusCls = 'stale'; statusTxt = 'CLOSED'; }
+    else if (hit)         { statusCls = 'target'; statusTxt = `TARGET +${fmtPct(item.target_return)}`; }
+    else if (expired)     { statusCls = 'miss';  statusTxt = `EXPIRED ${days}D`; }
+
+    const maxPnl = pnl != null ? Math.max(item.max_pnl || 0, pnl) : item.max_pnl;
+
+    return `<tr data-id="${item.id}">
+      <td class="dim">${item.opened.slice(0, 10)}</td>
+      <td class="num ${expired ? 'bad' : 'dim'}">${days}/${item.window_days}</td>
+      <td><strong>${item.pair}</strong></td>
+      <td><span class="signal-badge ${sideCls}">${item.side}</span></td>
+      <td class="dim">${item.level}</td>
+      <td class="num">
+        ${fmtMoney(item.entry_p1)} → <span class="price-cell" data-key="p1-${item.id}">${fmtMoney(p1Now)}</span>
+      </td>
+      <td class="num">
+        ${fmtMoney(item.entry_p2)} → <span class="price-cell" data-key="p2-${item.id}">${fmtMoney(p2Now)}</span>
+      </td>
+      <td class="num dim">
+        ${fmtNum(item.entry_ratio, 4)} → ${fmtNum(ratioNow, 4)}
+      </td>
+      <td class="num ${pnlCls}"><strong>${fmtPct(pnl)}</strong></td>
+      <td class="num ${maxPnl > 0 ? 'good' : 'dim'}">${fmtPct(maxPnl)}</td>
+      <td class="num">${fmtPct(item.target_return)}</td>
+      <td><span class="signal-badge ${statusCls}">${statusTxt}</span></td>
+      <td><button class="btn-row" data-action="remove" data-id="${item.id}">✕</button></td>
+    </tr>`;
+  }).join('');
+
+  // persist max_pnl and hit flag
+  const updated = list.map(it => {
+    const lp = livePrices[it.ticker1]; const rp = livePrices[it.ticker2];
+    const pnl = computePnL(it, lp?.c, rp?.c);
+    if (pnl == null) return it;
+    return { ...it,
+      max_pnl: Math.max(it.max_pnl || 0, pnl),
+      hit_target: it.hit_target || pnl >= it.target_return };
+  });
+  if (JSON.stringify(updated) !== JSON.stringify(list)) saveWatch(updated);
+
+  tbody.querySelectorAll('button[data-action="remove"]').forEach(b => {
+    b.addEventListener('click', () => removeFromWatchlist(b.dataset.id));
+  });
+}
+
 async function refreshLivePrices() {
   const list = loadWatch();
   if (list.length === 0) {
@@ -1165,248 +1405,6 @@ function flashChangedPrices() {
       if (!el) return;
       el.classList.remove('flash-up', 'flash-down');
       void el.offsetWidth; // restart animation
-      el.classList.add(curr > prev ? 'flash-up' : 'flash-down');
-    });
-  });
-}
-
-let watchMarketData = {};
-let prevWatchMarketData = {};
-
-function getWatchTradePrefs() {
-  return {
-    trade_mode: document.getElementById('watch-trade-mode')?.value || 'SHARES',
-    usd_per_leg: parseDecimal(document.getElementById('watch-usd-per-leg')?.value || '1000'),
-    target_dte: parseInt(document.getElementById('watch-target-dte')?.value || '30', 10),
-  };
-}
-
-async function buildTradePlan(summary) {
-  const prefs = getWatchTradePrefs();
-  const r = await fetch(`${BACKEND_URL}/api/trade-plan`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      ticker1: summary.ticker1,
-      ticker2: summary.ticker2,
-      current_signal: summary.current_signal,
-      p1_now: summary.p1_now,
-      p2_now: summary.p2_now,
-      trade_mode: prefs.trade_mode,
-      usd_per_leg: prefs.usd_per_leg,
-      target_dte: prefs.target_dte,
-    }),
-  });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.detail || `HTTP ${r.status}`);
-  }
-  const data = await r.json();
-  return { ...prefs, ...data };
-}
-
-function formatShareLeg(leg, currentPrice, cellKey) {
-  if (!leg) return `â€” â†’ <span class="price-cell" data-key="${cellKey}">${fmtMoney(currentPrice)}</span>`;
-  return `${leg.ticker} ${leg.direction} ${fmtNum(leg.shares, 3)} @ ${fmtMoney(leg.entry_price)} â†’ <span class="price-cell" data-key="${cellKey}">${fmtMoney(currentPrice)}</span>`;
-}
-
-function formatOptionLeg(leg, currentPrice, cellKey) {
-  if (!leg) return 'â€”';
-  return `${leg.ticker} ${leg.option_type} ${fmtNum(leg.strike, 2)} ${leg.expiry} x${leg.contracts} @ ${fmtMoney(leg.entry_price)} â†’ <span class="price-cell" data-key="${cellKey}">${fmtMoney(currentPrice)}</span>`;
-}
-
-async function addToWatchlist(s) {
-  const list = loadWatch();
-  const opened = new Date().toISOString();
-  const signalText = s.current_signal || '';
-  const side = signalText.startsWith('LONG') ? 'LONG' : signalText.startsWith('SHORT') ? 'SHORT' : null;
-  if (!side) {
-    setMsg('watch-msg', 'NO ACTIVE SIGNAL TO ADD', 'err');
-    return false;
-  }
-
-  const item = {
-    id: `${s.pair}@${opened}`,
-    pair: s.pair,
-    ticker1: s.ticker1,
-    ticker2: s.ticker2,
-    side,
-    level: signalText.replace(/(LONG|SHORT)[\s_]+/, '').replace('_SPREAD', ' SPREAD'),
-    model_type: s.model_type || 'RATIO',
-    opened,
-    entry_p1: s.p1_now,
-    entry_p2: s.p2_now,
-    entry_ratio: s.ratio_now,
-    target_return: s.target_return ?? 0.05,
-    window_days: s.window_days ?? 30,
-    max_pnl: 0,
-    hit_target: false,
-    closed: false,
-    median: s.median,
-  };
-  if (list.find(w => w.pair === item.pair && Math.abs(new Date(w.opened) - new Date(item.opened)) < 60000)) return false;
-
-  const trade = await buildTradePlan(s);
-  item.trade_mode = trade.trade_mode;
-  item.usd_per_leg = trade.usd_per_leg;
-  item.target_dte = trade.target_dte;
-  item.trade_plan = trade.plan;
-  item.leg1 = trade.plan.legs?.[0] || null;
-  item.leg2 = trade.plan.legs?.[1] || null;
-  item.option1 = trade.trade_mode === 'OPTIONS' ? item.leg1 : null;
-  item.option2 = trade.trade_mode === 'OPTIONS' ? item.leg2 : null;
-
-  list.push(item);
-  saveWatch(list);
-  renderWatchlist();
-  return true;
-}
-
-function computePnL(item, market) {
-  if (item.trade_mode === 'OPTIONS') {
-    const leg1 = item.option1;
-    const leg2 = item.option2;
-    const now1 = market?.option1?.price ?? null;
-    const now2 = market?.option2?.price ?? null;
-    if (!leg1 || !leg2 || now1 == null || now2 == null) return null;
-    const pnl = ((now1 - leg1.entry_price) * 100 * leg1.contracts) + ((now2 - leg2.entry_price) * 100 * leg2.contracts);
-    const cost = (leg1.entry_cost || 0) + (leg2.entry_cost || 0);
-    return cost > 0 ? pnl / cost : null;
-  }
-
-  const leg1 = item.leg1;
-  const leg2 = item.leg2;
-  const p1Now = market?.ticker1?.c ?? null;
-  const p2Now = market?.ticker2?.c ?? null;
-  if ((!leg1 || !leg2) && p1Now != null && p2Now != null && item.entry_p1 && item.entry_p2) {
-    const hedgeRatio = item.hedge_ratio ?? 1;
-    const r1 = p1Now / item.entry_p1 - 1;
-    const r2 = p2Now / item.entry_p2 - 1;
-    return item.side === 'LONG' ? (r1 - hedgeRatio * r2) : (-r1 + hedgeRatio * r2);
-  }
-  if (!leg1 || !leg2 || p1Now == null || p2Now == null) return null;
-  const sign1 = leg1.direction === 'SHORT' ? -1 : 1;
-  const sign2 = leg2.direction === 'SHORT' ? -1 : 1;
-  const pnl = sign1 * (p1Now - leg1.entry_price) * leg1.shares + sign2 * (p2Now - leg2.entry_price) * leg2.shares;
-  const gross = (leg1.entry_notional || 0) + (leg2.entry_notional || 0);
-  return gross > 0 ? pnl / gross : null;
-}
-
-function renderWatchlist() {
-  const list = loadWatch();
-  const tbody = document.querySelector('#watch-table tbody');
-  if (list.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="13" class="empty">â€” NO SIGNALS WATCHED Â· ADD FROM SINGLE-PAIR OR SCREENER â€”</td></tr>';
-    return;
-  }
-
-  const sorted = list.slice().sort((a, b) => {
-    if (a.closed !== b.closed) return a.closed ? 1 : -1;
-    return new Date(b.opened) - new Date(a.opened);
-  });
-
-  tbody.innerHTML = sorted.map(item => {
-    const market = watchMarketData[item.id] || {};
-    const p1Now = market.ticker1?.c ?? null;
-    const p2Now = market.ticker2?.c ?? null;
-    const pnl = computePnL(item, market);
-    const ratioNow = (p1Now != null && p2Now != null) ? (p1Now / p2Now) : null;
-
-    const pnlCls = pnl == null ? 'dim' : pnl > 0 ? 'good' : 'bad';
-    const sideCls = item.side === 'LONG' ? 'long' : 'short';
-    const days = daysSince(item.opened);
-    const expired = days >= item.window_days;
-    const hit = pnl != null && pnl >= item.target_return;
-
-    let statusCls = 'open', statusTxt = 'OPEN';
-    if (item.closed)      { statusCls = 'stale'; statusTxt = 'CLOSED'; }
-    else if (hit)         { statusCls = 'target'; statusTxt = `TARGET +${fmtPct(item.target_return)}`; }
-    else if (expired)     { statusCls = 'miss';  statusTxt = `EXPIRED ${days}D`; }
-
-    const maxPnl = pnl != null ? Math.max(item.max_pnl || 0, pnl) : item.max_pnl;
-
-    return `<tr data-id="${item.id}">
-      <td class="dim">${item.opened.slice(0, 10)}</td>
-      <td class="num ${expired ? 'bad' : 'dim'}">${days}/${item.window_days}</td>
-      <td><strong>${item.pair}</strong><div class="dim">${tradeModeLabel(item.trade_mode)} Â· ${fmtMoney(item.usd_per_leg)}/LEG</div></td>
-      <td><span class="signal-badge ${sideCls}">${item.side}</span></td>
-      <td class="dim">${item.level}</td>
-      <td class="num">${item.trade_mode === 'OPTIONS' ? formatOptionLeg(item.option1, market.option1?.price ?? null, `o1-${item.id}`) : formatShareLeg(item.leg1, p1Now, `p1-${item.id}`)}</td>
-      <td class="num">${item.trade_mode === 'OPTIONS' ? formatOptionLeg(item.option2, market.option2?.price ?? null, `o2-${item.id}`) : formatShareLeg(item.leg2, p2Now, `p2-${item.id}`)}</td>
-      <td class="num dim">${fmtNum(item.entry_ratio, 4)} â†’ ${fmtNum(ratioNow, 4)}</td>
-      <td class="num ${pnlCls}"><strong>${fmtPct(pnl)}</strong></td>
-      <td class="num ${maxPnl > 0 ? 'good' : 'dim'}">${fmtPct(maxPnl)}</td>
-      <td class="num">${fmtPct(item.target_return)}</td>
-      <td><span class="signal-badge ${statusCls}">${statusTxt}</span></td>
-      <td><button class="btn-row" data-action="remove" data-id="${item.id}">âœ•</button></td>
-    </tr>`;
-  }).join('');
-
-  const updated = list.map(it => {
-    const pnl = computePnL(it, watchMarketData[it.id] || {});
-    if (pnl == null) return it;
-    return { ...it, max_pnl: Math.max(it.max_pnl || 0, pnl), hit_target: it.hit_target || pnl >= it.target_return };
-  });
-  if (JSON.stringify(updated) !== JSON.stringify(list)) saveWatch(updated);
-
-  tbody.querySelectorAll('button[data-action="remove"]').forEach(b => {
-    b.addEventListener('click', () => removeFromWatchlist(b.dataset.id));
-  });
-}
-
-async function refreshLivePrices() {
-  const list = loadWatch();
-  if (list.length === 0) {
-    document.getElementById('last-update').textContent = 'â€”';
-    return;
-  }
-
-  try {
-    const r = await fetch(`${BACKEND_URL}/api/watchlist-live`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        items: list.map(item => ({
-          id: item.id,
-          ticker1: item.ticker1,
-          ticker2: item.ticker2,
-          trade_mode: item.trade_mode || 'SHARES',
-          option1: item.option1 || null,
-          option2: item.option2 || null,
-        })),
-      }),
-    });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    prevWatchMarketData = watchMarketData;
-    watchMarketData = data.items || {};
-    livePrices = data.stock_prices || {};
-    document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
-    setMsg('watch-msg', `OK LIVE WATCHLIST Â· ${Object.keys(watchMarketData).length} TRADES`, 'ok');
-    renderWatchlist();
-    flashChangedPrices();
-  } catch (e) {
-    setMsg('watch-msg', `âœ— LIVE FEED ERROR Â· ${e.message}`, 'err');
-  }
-  secondsLeft = POLL_INTERVAL;
-}
-
-function flashChangedPrices() {
-  loadWatch().forEach(item => {
-    const current = watchMarketData[item.id] || {};
-    const previous = prevWatchMarketData[item.id] || {};
-    const cells = item.trade_mode === 'OPTIONS'
-      ? [['option1', `o1-${item.id}`], ['option2', `o2-${item.id}`]]
-      : [['ticker1', `p1-${item.id}`], ['ticker2', `p2-${item.id}`]];
-
-    cells.forEach(([key, cellKey]) => {
-      const prev = item.trade_mode === 'OPTIONS' ? previous[key]?.price : previous[key]?.c;
-      const curr = item.trade_mode === 'OPTIONS' ? current[key]?.price : current[key]?.c;
-      if (prev == null || curr == null || prev === curr) return;
-      const el = document.querySelector(`[data-key="${cellKey}"]`);
-      if (!el) return;
-      el.classList.remove('flash-up', 'flash-down');
-      void el.offsetWidth;
       el.classList.add(curr > prev ? 'flash-up' : 'flash-down');
     });
   });
