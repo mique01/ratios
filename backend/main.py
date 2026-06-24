@@ -10,7 +10,7 @@ import itertools
 import math
 import time
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -72,6 +72,38 @@ class ScreenerRequest(BaseModel):
     min_signals: int = 3
 
 
+class TradePlanRequest(BaseModel):
+    ticker1: str
+    ticker2: str
+    current_signal: str
+    p1_now: float
+    p2_now: float
+    trade_mode: str = "SHARES"
+    usd_per_leg: float = 1000.0
+    target_dte: int = 30
+
+
+class WatchlistLiveLeg(BaseModel):
+    contract_symbol: str
+    underlying: str
+    expiry: str
+    option_type: str
+    strike: float
+
+
+class WatchlistLiveItem(BaseModel):
+    id: str
+    ticker1: str
+    ticker2: str
+    trade_mode: str = "SHARES"
+    option1: Optional[WatchlistLiveLeg] = None
+    option2: Optional[WatchlistLiveLeg] = None
+
+
+class WatchlistLiveRequest(BaseModel):
+    items: List[WatchlistLiveItem] = Field(default_factory=list)
+
+
 # ========================================================================
 # HELPERS
 # ========================================================================
@@ -86,6 +118,175 @@ def _safe_float(x):
         return v
     except (TypeError, ValueError):
         return None
+
+
+def _quote_with_fallback(last_price, bid, ask):
+    last = _safe_float(last_price)
+    bid_v = _safe_float(bid)
+    ask_v = _safe_float(ask)
+    if bid_v is not None and ask_v is not None and bid_v > 0 and ask_v > 0:
+        return (bid_v + ask_v) / 2
+    if last is not None and last > 0:
+        return last
+    if bid_v is not None and bid_v > 0:
+        return bid_v
+    if ask_v is not None and ask_v > 0:
+        return ask_v
+    return None
+
+
+def _signal_side(signal: str) -> Optional[str]:
+    text = (signal or "").upper()
+    if text.startswith("LONG"):
+        return "LONG"
+    if text.startswith("SHORT"):
+        return "SHORT"
+    return None
+
+
+def _share_directions(side: str):
+    if side == "LONG":
+        return ("LONG", "SHORT")
+    return ("SHORT", "LONG")
+
+
+def _option_types_for_side(side: str):
+    if side == "LONG":
+        return ("call", "put")
+    return ("put", "call")
+
+
+def _build_share_plan(side: str, ticker1: str, ticker2: str, p1_now: float, p2_now: float, usd_per_leg: float):
+    dir1, dir2 = _share_directions(side)
+    qty1 = usd_per_leg / p1_now
+    qty2 = usd_per_leg / p2_now
+    return {
+        "trade_mode": "SHARES",
+        "usd_per_leg": _safe_float(usd_per_leg),
+        "total_gross_exposure": _safe_float(usd_per_leg * 2),
+        "legs": [
+            {
+                "ticker": ticker1,
+                "direction": dir1,
+                "action": "BUY" if dir1 == "LONG" else "SHORT",
+                "entry_price": _safe_float(p1_now),
+                "shares": _safe_float(qty1),
+                "entry_notional": _safe_float(qty1 * p1_now),
+            },
+            {
+                "ticker": ticker2,
+                "direction": dir2,
+                "action": "BUY" if dir2 == "LONG" else "SHORT",
+                "entry_price": _safe_float(p2_now),
+                "shares": _safe_float(qty2),
+                "entry_notional": _safe_float(qty2 * p2_now),
+            },
+        ],
+    }
+
+
+def _load_option_candidates(ticker: str, expiry: str, option_type: str):
+    chain = yf.Ticker(ticker).option_chain(expiry)
+    df = chain.calls if option_type == "call" else chain.puts
+    if df is None or df.empty:
+        raise HTTPException(status_code=400, detail=f"No {option_type}s found for {ticker} {expiry}.")
+    candidates = df.copy()
+    candidates["quote"] = candidates.apply(
+        lambda row: _quote_with_fallback(row.get("lastPrice"), row.get("bid"), row.get("ask")),
+        axis=1,
+    )
+    candidates = candidates[candidates["quote"].notna()]
+    if candidates.empty:
+        raise HTTPException(status_code=400, detail=f"No liquid {option_type}s found for {ticker} {expiry}.")
+    return candidates
+
+
+def _select_nearest_expiry(ticker: str, target_dte: int) -> str:
+    expiries = yf.Ticker(ticker).options or []
+    if not expiries:
+        raise HTTPException(status_code=400, detail=f"No option expiries available for {ticker}.")
+
+    today = datetime.now(timezone.utc).date()
+    parsed = []
+    for expiry in expiries:
+        exp_date = datetime.strptime(expiry, "%Y-%m-%d").date()
+        days = (exp_date - today).days
+        if days >= 0:
+            parsed.append((expiry, days))
+    if not parsed:
+        raise HTTPException(status_code=400, detail=f"No non-expired option expiries available for {ticker}.")
+
+    parsed.sort(key=lambda row: (abs(row[1] - target_dte), row[1]))
+    return parsed[0][0]
+
+
+def _select_option_contract(ticker: str, option_type: str, underlying_price: float, target_dte: int):
+    expiry = _select_nearest_expiry(ticker, target_dte)
+    exp_date = datetime.strptime(expiry, "%Y-%m-%d").date()
+    days_to_expiry = (exp_date - datetime.now(timezone.utc).date()).days
+    candidates = _load_option_candidates(ticker, expiry, option_type)
+    candidates["atm_distance"] = (candidates["strike"] - underlying_price).abs()
+    candidates["spread"] = (candidates["ask"].fillna(0) - candidates["bid"].fillna(0)).abs()
+    best = candidates.sort_values(["atm_distance", "spread", "volume"], ascending=[True, True, False]).iloc[0]
+    price = _quote_with_fallback(best.get("lastPrice"), best.get("bid"), best.get("ask"))
+    if price is None or price <= 0:
+        raise HTTPException(status_code=400, detail=f"Invalid {option_type} quote for {ticker}.")
+
+    return {
+        "ticker": ticker,
+        "option_type": option_type.upper(),
+        "contract_symbol": best["contractSymbol"],
+        "expiry": expiry,
+        "days_to_expiry": days_to_expiry,
+        "strike": _safe_float(best["strike"]),
+        "entry_price": _safe_float(price),
+        "bid": _safe_float(best.get("bid")),
+        "ask": _safe_float(best.get("ask")),
+        "last_price": _safe_float(best.get("lastPrice")),
+    }
+
+
+def _build_option_plan(side: str, ticker1: str, ticker2: str, p1_now: float, p2_now: float, usd_per_leg: float, target_dte: int):
+    opt_type1, opt_type2 = _option_types_for_side(side)
+    leg1 = _select_option_contract(ticker1, opt_type1, p1_now, target_dte)
+    leg2 = _select_option_contract(ticker2, opt_type2, p2_now, target_dte)
+
+    for leg in (leg1, leg2):
+        exact_contracts = usd_per_leg / (leg["entry_price"] * 100)
+        contracts = max(1, int(round(exact_contracts)))
+        leg["action"] = "BUY_TO_OPEN"
+        leg["contracts"] = contracts
+        leg["exact_contracts"] = _safe_float(exact_contracts)
+        leg["entry_cost"] = _safe_float(contracts * leg["entry_price"] * 100)
+
+    return {
+        "trade_mode": "OPTIONS",
+        "usd_per_leg": _safe_float(usd_per_leg),
+        "target_dte": int(target_dte),
+        "total_entry_cost": _safe_float((leg1["entry_cost"] or 0) + (leg2["entry_cost"] or 0)),
+        "legs": [leg1, leg2],
+    }
+
+
+def _option_quote_from_chain(cache: Dict, underlying: str, expiry: str, contract_symbol: str, option_type: str):
+    key = (underlying, expiry)
+    if key not in cache:
+        cache[key] = {
+            "call": _load_option_candidates(underlying, expiry, "call"),
+            "put": _load_option_candidates(underlying, expiry, "put"),
+        }
+    df = cache[key]["call" if option_type.lower() == "call" else "put"]
+    row = df[df["contractSymbol"] == contract_symbol]
+    if row.empty:
+        return None
+    data = row.iloc[0]
+    price = _quote_with_fallback(data.get("lastPrice"), data.get("bid"), data.get("ask"))
+    return {
+        "price": _safe_float(price),
+        "bid": _safe_float(data.get("bid")),
+        "ask": _safe_float(data.get("ask")),
+        "last_price": _safe_float(data.get("lastPrice")),
+    }
 
 
 def calculate_half_life(spread: pd.Series) -> float:
@@ -977,6 +1178,88 @@ def screener(req: ScreenerRequest):
         "tickers_used": list(prices.columns),
         "tickers_dropped": sorted(set(tickers) - set(prices.columns)),
     }
+
+
+@app.post("/api/trade-plan")
+def trade_plan(req: TradePlanRequest):
+    t1 = req.ticker1.upper().strip()
+    t2 = req.ticker2.upper().strip()
+    if t1 == t2 or not t1 or not t2:
+        raise HTTPException(status_code=400, detail="Tickers must be different and non-empty.")
+
+    side = _signal_side(req.current_signal)
+    if side is None:
+        raise HTTPException(status_code=400, detail="Current signal must be LONG or SHORT.")
+    if req.usd_per_leg <= 0:
+        raise HTTPException(status_code=400, detail="usd_per_leg must be positive.")
+
+    mode = (req.trade_mode or "SHARES").upper()
+    if mode == "SHARES":
+        plan = _build_share_plan(side, t1, t2, req.p1_now, req.p2_now, req.usd_per_leg)
+    elif mode == "OPTIONS":
+        plan = _build_option_plan(side, t1, t2, req.p1_now, req.p2_now, req.usd_per_leg, req.target_dte)
+    else:
+        raise HTTPException(status_code=400, detail="trade_mode must be SHARES or OPTIONS.")
+
+    return {
+        "pair": f"{t1}/{t2}",
+        "side": side,
+        "trade_mode": mode,
+        "plan": plan,
+    }
+
+
+@app.post("/api/watchlist-live")
+def watchlist_live(req: WatchlistLiveRequest):
+    items = req.items or []
+    if not items:
+        return {"items": {}, "stock_prices": {}, "as_of": None}
+
+    wanted = sorted({sym for item in items for sym in [item.ticker1.upper().strip(), item.ticker2.upper().strip()] if sym})
+    idx = _fetch_live()
+    stock_prices = {}
+    for sym in wanted:
+        row = idx.get(sym)
+        stock_prices[sym] = None if row is None else {
+            "c": _safe_float(row.get("c")),
+            "pct_change": _safe_float(row.get("pct_change")),
+            "px_bid": _safe_float(row.get("px_bid")),
+            "px_ask": _safe_float(row.get("px_ask")),
+        }
+
+    option_cache = {}
+    out = {}
+    for item in items:
+        ticker1 = item.ticker1.upper().strip()
+        ticker2 = item.ticker2.upper().strip()
+        payload = {
+            "ticker1": stock_prices.get(ticker1),
+            "ticker2": stock_prices.get(ticker2),
+        }
+
+        if (item.trade_mode or "SHARES").upper() == "OPTIONS":
+            payload["option1"] = None
+            payload["option2"] = None
+            if item.option1:
+                payload["option1"] = _option_quote_from_chain(
+                    option_cache,
+                    item.option1.underlying.upper().strip(),
+                    item.option1.expiry,
+                    item.option1.contract_symbol,
+                    item.option1.option_type,
+                )
+            if item.option2:
+                payload["option2"] = _option_quote_from_chain(
+                    option_cache,
+                    item.option2.underlying.upper().strip(),
+                    item.option2.expiry,
+                    item.option2.contract_symbol,
+                    item.option2.option_type,
+                )
+
+        out[item.id] = payload
+
+    return {"items": out, "stock_prices": stock_prices, "as_of": _LIVE_CACHE["ts"]}
 
 
 @app.get("/api/live-prices")

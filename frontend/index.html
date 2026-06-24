@@ -292,6 +292,14 @@
       <label><span>TICKER 1</span><input id="mon-t1" type="text" value="KO" maxlength="6" /></label>
       <label><span>TICKER 2</span><input id="mon-t2" type="text" value="PEP" maxlength="6" /></label>
       <label><span>START YEAR</span><input id="mon-start-year" type="number" value="2022" min="2000" max="2026" /></label>
+      <label class="select-all"><span>TRADE MODE</span>
+        <select id="watch-trade-mode">
+          <option value="SHARES">SHARES L/S</option>
+          <option value="OPTIONS">OPTIONS 30D</option>
+        </select>
+      </label>
+      <label><span>USD / LEG</span><input id="watch-usd-per-leg" type="number" value="1000" min="1" step="100" /></label>
+      <label><span>TARGET DTE</span><input id="watch-target-dte" type="number" value="30" min="7" max="120" step="1" /></label>
       <label class="select-all"><span>MODEL</span>
         <select id="mon-model">
           <option value="RATIO">RATIO</option>
