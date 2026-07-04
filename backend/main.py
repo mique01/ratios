@@ -62,8 +62,6 @@ class RobustPairRequest(BaseModel):
     max_half_life_filter: int = 60
     windows_to_test: List[int] = Field(default_factory=lambda: [10, 15, 20, 25, 30, 40, 50, 60])
     stds_to_test: List[float] = Field(default_factory=lambda: [1.5, 1.75, 2.0, 2.25, 2.5])
-    formation_days: int = 252
-    trading_days: int = 126
 
 
 class ScreenerRequest(BaseModel):
@@ -460,16 +458,12 @@ def run_robust_backtest(
     use_target_exit=False,
     transaction_cost=0.002,
     min_signals=5,
-    half_life=None,
-    start_idx=None,
-    end_idx=None,
 ):
-    rolling_mean = spread.rolling(bb_window).mean().shift(1)
-    rolling_std = spread.rolling(bb_window).std().shift(1)
+    rolling_mean = spread.rolling(bb_window).mean()
+    rolling_std = spread.rolling(bb_window).std()
     zscore = (spread - rolling_mean) / rolling_std
 
-    if half_life is None:
-        half_life = calculate_half_life(spread)
+    half_life = calculate_half_life(spread)
 
     if np.isfinite(half_life):
         max_trade_days = int(min(bb_window, max(3, round(2 * half_life))))
@@ -477,10 +471,9 @@ def run_robust_backtest(
         max_trade_days = bb_window
 
     trades = []
-    i = max(bb_window + 1, int(start_idx) if start_idx is not None else bb_window + 1)
-    last_signal_idx = len(spread) - 3 if end_idx is None else min(int(end_idx), len(spread) - 3)
+    i = bb_window + 1
 
-    while i <= last_signal_idx:
+    while i < len(spread) - 1:
         z = zscore.iloc[i]
         z_prev = zscore.iloc[i - 1]
 
@@ -498,40 +491,39 @@ def run_robust_backtest(
             i += 1
             continue
 
-        signal_idx = i
-        entry_idx = signal_idx + 1
-        if entry_idx >= len(spread):
-            break
-
+        entry_idx = i
         entry_date = spread.index[entry_idx]
+
         p1_entry = prices[ticker1].iloc[entry_idx]
         p2_entry = prices[ticker2].iloc[entry_idx]
-        spread_entry = spread.iloc[signal_idx]
-        z_entry = zscore.iloc[signal_idx]
+        spread_entry = spread.iloc[entry_idx]
+        z_entry = zscore.iloc[entry_idx]
 
         exit_idx = None
         exit_reason = None
         best_return = -999.0
         worst_return = 999.0
         current_return = 0.0
-        max_forward_signal = min(entry_idx + max_trade_days - 1, len(spread) - 2)
 
-        for j in range(entry_idx, max_forward_signal + 1):
+        max_forward = min(entry_idx + max_trade_days, len(spread) - 1)
+
+        for j in range(entry_idx + 1, max_forward + 1):
             p1_now = prices[ticker1].iloc[j]
             p2_now = prices[ticker2].iloc[j]
+
             ret1 = p1_now / p1_entry - 1
             ret2 = p2_now / p2_entry - 1
 
             if signal == "LONG_SPREAD":
                 current_return = ret1 - hedge_ratio * ret2
                 if zscore.iloc[j] >= exit_z:
-                    exit_idx = j + 1
+                    exit_idx = j
                     exit_reason = "MEAN_REVERSION"
                     break
             else:
                 current_return = -ret1 + hedge_ratio * ret2
                 if zscore.iloc[j] <= exit_z:
-                    exit_idx = j + 1
+                    exit_idx = j
                     exit_reason = "MEAN_REVERSION"
                     break
 
@@ -539,25 +531,26 @@ def run_robust_backtest(
             worst_return = min(worst_return, current_return)
 
             if use_target_exit and current_return >= target_return:
-                exit_idx = j + 1
+                exit_idx = j
                 exit_reason = "TARGET"
                 break
 
         if exit_idx is None:
-            exit_idx = max_forward_signal + 1
+            exit_idx = max_forward
             exit_reason = "TIME_STOP"
 
-        p1_now = prices[ticker1].iloc[exit_idx]
-        p2_now = prices[ticker2].iloc[exit_idx]
-        ret1 = p1_now / p1_entry - 1
-        ret2 = p2_now / p2_entry - 1
-        current_return = (ret1 - hedge_ratio * ret2) if signal == "LONG_SPREAD" else (-ret1 + hedge_ratio * ret2)
+            p1_now = prices[ticker1].iloc[exit_idx]
+            p2_now = prices[ticker2].iloc[exit_idx]
+
+            ret1 = p1_now / p1_entry - 1
+            ret2 = p2_now / p2_entry - 1
+
+            current_return = (ret1 - hedge_ratio * ret2) if signal == "LONG_SPREAD" else (-ret1 + hedge_ratio * ret2)
 
         gross_return = current_return
         net_return = gross_return - transaction_cost
 
         trades.append({
-            "signal_date": spread.index[signal_idx],
             "entry_date": entry_date,
             "exit_date": spread.index[exit_idx],
             "signal": signal,
@@ -579,41 +572,11 @@ def run_robust_backtest(
         i = exit_idx + 1
 
     trades = pd.DataFrame(trades)
-    metrics = _metrics_from_trades(trades, bb_window, entry_z, min_signals)
-    return trades, metrics, rolling_mean, rolling_std, zscore
 
-
-def _estimate_roll_full_spread_pct(prices: pd.Series) -> Optional[float]:
-    clean = prices.dropna()
-    if len(clean) < 30:
-        return None
-
-    diffs = clean.diff().dropna().values
-    if len(diffs) < 2:
-        return None
-
-    cov = np.cov(diffs[1:], diffs[:-1], ddof=1)[0, 1]
-    last_price = float(clean.iloc[-1])
-    if cov >= 0 or last_price <= 0:
-        return None
-
-    full_spread = 2 * math.sqrt(-cov)
-    return full_spread / last_price
-
-
-def _round_trip_spread_cost(formation_prices: pd.DataFrame, ticker1: str, ticker2: str, hedge_ratio: float, fallback_cost: float) -> float:
-    spread1 = _estimate_roll_full_spread_pct(formation_prices[ticker1])
-    spread2 = _estimate_roll_full_spread_pct(formation_prices[ticker2])
-    if spread1 is None or spread2 is None:
-        return max(float(fallback_cost or 0), 0.0)
-    return max(spread1 + abs(float(hedge_ratio)) * spread2, 0.0)
-
-
-def _metrics_from_trades(trades: pd.DataFrame, bb_window: int, entry_z: float, min_signals: int):
-    if trades is None or len(trades) == 0:
-        return {
-            "bb_window": int(bb_window),
-            "entry_z": float(entry_z),
+    if len(trades) == 0:
+        metrics = {
+            "bb_window": bb_window,
+            "entry_z": entry_z,
             "signals": 0,
             "winrate": None,
             "avg_return": None,
@@ -624,6 +587,7 @@ def _metrics_from_trades(trades: pd.DataFrame, bb_window: int, entry_z: float, m
             "avg_days": None,
             "score": -999,
         }
+        return trades, metrics, rolling_mean, rolling_std, zscore
 
     returns = trades["net_return"]
     winrate = (returns > 0).mean()
@@ -633,6 +597,7 @@ def _metrics_from_trades(trades: pd.DataFrame, bb_window: int, entry_z: float, m
     sharpe = returns.mean() / returns.std() * np.sqrt(252 / max(trades["days"].mean(), 1)) if returns.std() != 0 else float("nan")
     mdd = max_drawdown(returns)
     avg_days = trades["days"].mean()
+
     signal_penalty = 0 if len(trades) >= min_signals else -50
     score = (
         winrate * 100
@@ -643,9 +608,9 @@ def _metrics_from_trades(trades: pd.DataFrame, bb_window: int, entry_z: float, m
         + (0 if np.isnan(mdd) else mdd * 100)
     )
 
-    return {
-        "bb_window": int(bb_window),
-        "entry_z": float(entry_z),
+    metrics = {
+        "bb_window": bb_window,
+        "entry_z": entry_z,
         "signals": len(trades),
         "winrate": _safe_float(winrate),
         "avg_return": _safe_float(avg_return),
@@ -657,72 +622,7 @@ def _metrics_from_trades(trades: pd.DataFrame, bb_window: int, entry_z: float, m
         "score": _safe_float(score),
     }
 
-
-def _passes_cointegration_gate(spread: pd.Series, s1: pd.Series, s2: pd.Series, adf_threshold=0.05):
-    try:
-        adf_p = adfuller(spread.dropna())[1]
-    except Exception:
-        adf_p = float("nan")
-    try:
-        coint_p = coint(np.log(s1), np.log(s2))[1]
-    except Exception:
-        coint_p = float("nan")
-    return pd.notna(adf_p) and adf_p < adf_threshold, adf_p, coint_p
-
-
-def _optimize_robust_config(
-    formation_prices,
-    spread,
-    ticker1,
-    ticker2,
-    hedge_ratio,
-    half_life,
-    windows_to_test,
-    stds_to_test,
-    target_return,
-    use_target_exit,
-    transaction_cost,
-    min_signals,
-):
-    results = []
-    for w in windows_to_test:
-        for z in stds_to_test:
-            _, metrics, _, _, _ = run_robust_backtest(
-                prices=formation_prices,
-                spread=spread,
-                ticker1=ticker1,
-                ticker2=ticker2,
-                hedge_ratio=hedge_ratio,
-                bb_window=int(w),
-                entry_z=float(z),
-                exit_z=0.0,
-                target_return=target_return,
-                use_target_exit=use_target_exit,
-                transaction_cost=transaction_cost,
-                min_signals=min_signals,
-                half_life=half_life,
-            )
-            results.append(metrics)
-
-    optimization = pd.DataFrame(results).sort_values("score", ascending=False)
-    if optimization.empty or float(optimization.iloc[0]["score"]) <= -999:
-        return None, optimization
-    return optimization.iloc[0], optimization
-
-
-def _serialize_metric_row(row):
-    allowed = {"bb_window", "entry_z", "signals", "winrate", "avg_return", "total_return", "sharpe", "max_drawdown", "avg_days", "score"}
-    out = {}
-    for k, v in row.items():
-        if k not in allowed:
-            continue
-        if isinstance(v, (float, np.floating)):
-            out[k] = _safe_float(v)
-        elif isinstance(v, (int, np.integer)):
-            out[k] = int(v)
-        else:
-            out[k] = v
-    return out
+    return trades, metrics, rolling_mean, rolling_std, zscore
 
 
 def analyze_robust_pair(
@@ -736,183 +636,109 @@ def analyze_robust_pair(
     max_half_life_filter=60,
     windows_to_test=None,
     stds_to_test=None,
-    formation_days=252,
-    trading_days=126,
 ):
     windows_to_test = windows_to_test or [10, 15, 20, 25, 30, 40, 50, 60]
     stds_to_test = stds_to_test or [1.5, 1.75, 2.0, 2.25, 2.5]
-    formation_days = max(int(formation_days), max(windows_to_test) + 80)
-    trading_days = max(int(trading_days), 20)
 
     pair_prices = prices[[ticker1, ticker2]].dropna()
-    if len(pair_prices) < formation_days + 20:
+    if len(pair_prices) < 100:
         return None
+
+    spread, hedge_ratio, alpha = calculate_hedge_ratio_and_spread(pair_prices, ticker1, ticker2)
 
     s1 = pair_prices[ticker1]
     s2 = pair_prices[ticker2]
     corr_price = s1.corr(s2)
     corr_returns = s1.pct_change().corr(s2.pct_change())
 
-    all_oos_trades = []
-    selected_rows = []
-    skipped_not_coint = 0
-    skipped_half_life = 0
-    n_folds = 0
+    try:
+        adf_p = adfuller(spread.dropna())[1]
+    except Exception:
+        adf_p = float("nan")
+    try:
+        coint_p = coint(np.log(s1), np.log(s2))[1]
+    except Exception:
+        coint_p = float("nan")
 
-    max_start = len(pair_prices) - formation_days - 1
-    for start in range(0, max_start + 1, trading_days):
-        formation_end = start + formation_days
-        trading_end = min(formation_end + trading_days, len(pair_prices))
-        if trading_end - formation_end < 5:
-            break
+    half_life = calculate_half_life(spread)
 
-        formation = pair_prices.iloc[start:formation_end]
-        combined = pair_prices.iloc[start:trading_end]
-        formation_spread, fold_beta, _ = calculate_hedge_ratio_and_spread(formation, ticker1, ticker2)
-        gate_ok, fold_adf_p, fold_coint_p = _passes_cointegration_gate(
-            formation_spread,
-            formation[ticker1],
-            formation[ticker2],
-        )
-        if not gate_ok:
-            skipped_not_coint += 1
-            continue
+    results = []
+    all_backtests = {}
 
-        fold_half_life = calculate_half_life(formation_spread)
-        if not np.isfinite(fold_half_life) or fold_half_life > max_half_life_filter:
-            skipped_half_life += 1
-            continue
+    for w in windows_to_test:
+        for z in stds_to_test:
+            trades, metrics, rm, rs, zs = run_robust_backtest(
+                prices=pair_prices,
+                spread=spread,
+                ticker1=ticker1,
+                ticker2=ticker2,
+                hedge_ratio=hedge_ratio,
+                bb_window=int(w),
+                entry_z=float(z),
+                exit_z=0.0,
+                target_return=target_return,
+                use_target_exit=use_target_exit,
+                transaction_cost=transaction_cost,
+                min_signals=min_signals,
+            )
+            results.append(metrics)
+            all_backtests[(int(w), float(z))] = {
+                "trades": trades,
+                "rolling_mean": rm,
+                "rolling_std": rs,
+                "zscore": zs,
+            }
 
-        fold_cost = _round_trip_spread_cost(formation, ticker1, ticker2, fold_beta, transaction_cost)
-        best, _ = _optimize_robust_config(
-            formation,
-            formation_spread,
-            ticker1,
-            ticker2,
-            fold_beta,
-            fold_half_life,
-            windows_to_test,
-            stds_to_test,
-            target_return,
-            use_target_exit,
-            fold_cost,
-            min_signals,
-        )
-        if best is None:
-            continue
-
-        n_folds += 1
-        best_window = int(best["bb_window"])
-        best_entry_z = float(best["entry_z"])
-        combined_spread = np.log(combined[ticker1]) - fold_beta * np.log(combined[ticker2])
-        fold_trades, _, _, _, _ = run_robust_backtest(
-            prices=combined,
-            spread=combined_spread,
-            ticker1=ticker1,
-            ticker2=ticker2,
-            hedge_ratio=fold_beta,
-            bb_window=best_window,
-            entry_z=best_entry_z,
-            exit_z=0.0,
-            target_return=target_return,
-            use_target_exit=use_target_exit,
-            transaction_cost=fold_cost,
-            min_signals=min_signals,
-            half_life=fold_half_life,
-            start_idx=formation_days,
-            end_idx=len(combined) - 2,
-        )
-        if len(fold_trades) > 0:
-            fold_trades["fold_start"] = formation.index[0]
-            fold_trades["formation_end"] = formation.index[-1]
-            fold_trades["hedge_ratio"] = fold_beta
-            fold_trades["cost"] = fold_cost
-            all_oos_trades.append(fold_trades)
-
-        selected = best.to_dict()
-        selected.update({
-            "fold_start": formation.index[0],
-            "formation_end": formation.index[-1],
-            "adf_p": _safe_float(fold_adf_p),
-            "coint_p": _safe_float(fold_coint_p),
-            "half_life": _safe_float(fold_half_life),
-            "transaction_cost": _safe_float(fold_cost),
-        })
-        selected_rows.append(selected)
-
-    trades = pd.concat(all_oos_trades, ignore_index=True) if all_oos_trades else pd.DataFrame()
-    chosen_window = int(selected_rows[-1]["bb_window"]) if selected_rows else int(windows_to_test[0])
-    chosen_entry_z = float(selected_rows[-1]["entry_z"]) if selected_rows else float(stds_to_test[0])
-    oos_metrics = _metrics_from_trades(trades, chosen_window, chosen_entry_z, min_signals)
-
-    current_model_prices = pair_prices.iloc[-(formation_days + 1):-1] if len(pair_prices) > formation_days else pair_prices.iloc[:-1]
-    if len(current_model_prices) < max(windows_to_test) + 50:
+    optimization = pd.DataFrame(results).sort_values("score", ascending=False)
+    if optimization.empty:
         return None
 
-    current_spread_train, hedge_ratio, alpha = calculate_hedge_ratio_and_spread(current_model_prices, ticker1, ticker2)
-    current_gate_ok, adf_p, coint_p = _passes_cointegration_gate(current_spread_train, current_model_prices[ticker1], current_model_prices[ticker2])
-    half_life = calculate_half_life(current_spread_train)
-    current_cost = _round_trip_spread_cost(current_model_prices, ticker1, ticker2, hedge_ratio, transaction_cost)
+    best = optimization.iloc[0]
+    best_window = int(best["bb_window"])
+    best_entry_z = float(best["entry_z"])
+    best_data = all_backtests[(best_window, best_entry_z)]
 
-    current_best, current_optimization = _optimize_robust_config(
-        current_model_prices,
-        current_spread_train,
-        ticker1,
-        ticker2,
-        hedge_ratio,
-        half_life,
-        windows_to_test,
-        stds_to_test,
-        target_return,
-        use_target_exit,
-        current_cost,
-        min_signals,
-    )
-    if current_best is not None:
-        chosen_window = int(current_best["bb_window"])
-        chosen_entry_z = float(current_best["entry_z"])
-
-    spread = np.log(pair_prices[ticker1]) - hedge_ratio * np.log(pair_prices[ticker2])
-    rolling_mean = spread.rolling(chosen_window).mean().shift(1)
-    rolling_std = spread.rolling(chosen_window).std().shift(1)
-    zscore = (spread - rolling_mean) / rolling_std
-    upper_band = rolling_mean + chosen_entry_z * rolling_std
-    lower_band = rolling_mean - chosen_entry_z * rolling_std
+    trades = best_data["trades"]
+    rolling_mean = best_data["rolling_mean"]
+    rolling_std = best_data["rolling_std"]
+    zscore = best_data["zscore"]
+    upper_band = rolling_mean + best_entry_z * rolling_std
+    lower_band = rolling_mean - best_entry_z * rolling_std
 
     z_now = zscore.dropna().iloc[-1] if not zscore.dropna().empty else float("nan")
-    if current_gate_ok and pd.notna(z_now) and z_now >= chosen_entry_z:
+    if pd.notna(z_now) and z_now >= best_entry_z:
         current_signal = "SHORT_SPREAD"
-    elif current_gate_ok and pd.notna(z_now) and z_now <= -chosen_entry_z:
+    elif pd.notna(z_now) and z_now <= -best_entry_z:
         current_signal = "LONG_SPREAD"
     else:
-        current_signal = "SIN SENAL"
+        current_signal = "SIN SEÑAL"
 
     diagnostic = []
-    if current_gate_ok:
-        diagnostic.append({"type": "good", "text": "ADF gate OK en la ventana de formacion actual."})
-    else:
-        diagnostic.append({"type": "bad", "text": "ADF gate falla en la ventana de formacion actual; no se habilita senal."})
-
     if _safe_float(coint_p) is not None and coint_p < 0.05:
-        diagnostic.append({"type": "good", "text": "Cointegration p-value fuerte en formacion actual."})
+        diagnostic.append({"type": "good", "text": "Cointegration fuerte: par estadisticamente interesante."})
     elif _safe_float(coint_p) is not None and coint_p < 0.10:
-        diagnostic.append({"type": "warn", "text": "Cointegration p-value moderada en formacion actual."})
+        diagnostic.append({"type": "warn", "text": "Cointegration moderada: puede servir, con cuidado."})
     else:
-        diagnostic.append({"type": "warn", "text": "Cointegration p-value debil en formacion actual."})
+        diagnostic.append({"type": "bad", "text": "No hay cointegration clara: par debil para mean reversion."})
+
+    if _safe_float(adf_p) is not None and adf_p < 0.05:
+        diagnostic.append({"type": "good", "text": "ADF: el spread parece estacionario."})
+    else:
+        diagnostic.append({"type": "warn", "text": "ADF: el spread no parece claramente estacionario."})
 
     if np.isfinite(half_life) and half_life < max_half_life_filter:
-        diagnostic.append({"type": "good", "text": "Half-life estimada solo con datos de formacion."})
+        diagnostic.append({"type": "good", "text": "Half-life razonable."})
     else:
-        diagnostic.append({"type": "warn", "text": "Half-life lento o invalido en formacion actual."})
+        diagnostic.append({"type": "warn", "text": "Half-life lento o invalido."})
 
-    diagnostic.append({"type": "good", "text": f"Walk-forward OOS: {n_folds} folds usados; {skipped_not_coint} folds filtrados por ADF; {skipped_half_life} por half-life."})
-    diagnostic.append({"type": "warn", "text": "Sharpe aun no esta deflactado por multiple testing; las metricas ya son OOS pero no DSR/PBO."})
+    if len(trades) > 0 and best["signals"] < min_signals:
+        diagnostic.append({"type": "warn", "text": "Pocas señales: posible sobreoptimizacion."})
 
     equity = []
     if len(trades) > 0:
         eq = (1 + trades["net_return"]).cumprod()
         equity = [
-            {"date": pd.Timestamp(row["exit_date"]).strftime("%Y-%m-%d"), "equity": _safe_float(v)}
+            {"date": row["exit_date"].strftime("%Y-%m-%d"), "equity": _safe_float(v)}
             for (_, row), v in zip(trades.iterrows(), eq)
         ]
 
@@ -920,8 +746,8 @@ def analyze_robust_pair(
     if len(trades) > 0:
         for _, row in trades.iterrows():
             trades_out.append({
-                "entry_date": pd.Timestamp(row["entry_date"]).strftime("%Y-%m-%d"),
-                "exit_date": pd.Timestamp(row["exit_date"]).strftime("%Y-%m-%d"),
+                "entry_date": row["entry_date"].strftime("%Y-%m-%d"),
+                "exit_date": row["exit_date"].strftime("%Y-%m-%d"),
                 "signal": row["signal"],
                 "entry_z": _safe_float(row["entry_z"]),
                 "exit_z": _safe_float(row["exit_z"]),
@@ -933,13 +759,10 @@ def analyze_robust_pair(
                 "exit_reason": row["exit_reason"],
             })
 
-    selected_df = pd.DataFrame(selected_rows)
-    if not selected_df.empty:
-        optimization_out = [_serialize_metric_row(row) for row in selected_df.tail(10).to_dict("records")]
-    elif current_optimization is not None and not current_optimization.empty:
-        optimization_out = [_serialize_metric_row(row) for row in current_optimization.head(10).to_dict("records")]
-    else:
-        optimization_out = []
+    optimization_out = [
+        {k: _safe_float(v) if isinstance(v, (float, np.floating)) else int(v) if isinstance(v, (int, np.integer)) else v for k, v in row.items()}
+        for row in optimization.head(10).to_dict("records")
+    ]
 
     summary = {
         "pair": f"{ticker1}/{ticker2}",
@@ -952,17 +775,17 @@ def analyze_robust_pair(
         "adf_p": _safe_float(adf_p),
         "coint_p": _safe_float(coint_p),
         "half_life": _safe_float(half_life),
-        "best_window": chosen_window,
-        "best_entry_z": chosen_entry_z,
-        "signals": int(oos_metrics["signals"]),
-        "winrate": _safe_float(oos_metrics["winrate"]),
-        "avg_return": _safe_float(oos_metrics["avg_return"]),
-        "median_return": _safe_float(oos_metrics["median_return"]),
-        "total_return": _safe_float(oos_metrics["total_return"]),
-        "sharpe": _safe_float(oos_metrics["sharpe"]),
-        "max_drawdown": _safe_float(oos_metrics["max_drawdown"]),
-        "avg_days": _safe_float(oos_metrics["avg_days"]),
-        "score": _safe_float(oos_metrics["score"]),
+        "best_window": best_window,
+        "best_entry_z": best_entry_z,
+        "signals": int(best["signals"]),
+        "winrate": _safe_float(best["winrate"]),
+        "avg_return": _safe_float(best["avg_return"]),
+        "median_return": _safe_float(best["median_return"]),
+        "total_return": _safe_float(best["total_return"]),
+        "sharpe": _safe_float(best["sharpe"]),
+        "max_drawdown": _safe_float(best["max_drawdown"]),
+        "avg_days": _safe_float(best["avg_days"]),
+        "score": _safe_float(best["score"]),
         "zscore_now": _safe_float(z_now),
         "spread_now": _safe_float(spread.iloc[-1]),
         "current_signal": current_signal,
@@ -970,12 +793,7 @@ def analyze_robust_pair(
         "p2_now": _safe_float(s2.iloc[-1]),
         "ratio_now": _safe_float(s1.iloc[-1] / s2.iloc[-1]),
         "target_return": target_return,
-        "window_days": chosen_window,
-        "analysis_mode": "WALK_FORWARD_OOS",
-        "formation_days": formation_days,
-        "trading_days": trading_days,
-        "folds_used": n_folds,
-        "round_trip_cost_estimate": _safe_float(current_cost),
+        "window_days": best_window,
     }
 
     chart = {
@@ -998,12 +816,12 @@ def analyze_robust_pair(
 
 
 # ========================================================================
-# DATA912 — live price cache (20s TTL since they update every 20s)
+# DATA912 â€” live price cache (20s TTL since they update every 20s)
 # ========================================================================
 
 _LIVE_CACHE = {"data": None, "ts": 0.0}
 DATA912_URL = "https://data912.com/live/usa_stocks"
-CACHE_TTL = 15  # seconds — under their 20s refresh
+CACHE_TTL = 15  # seconds â€” under their 20s refresh
 
 # data912 returns 403 for the default `requests` User-Agent.
 # A standard browser UA works fine.
@@ -1040,8 +858,9 @@ def _download_yahoo_chart(tickers: List[str], start_date: str) -> pd.DataFrame:
 
             timestamps = result.get("timestamp") or []
             indicators = result.get("indicators", {})
+            adjclose = (indicators.get("adjclose") or [{}])[0].get("adjclose")
             close = (indicators.get("quote") or [{}])[0].get("close")
-            values = close or []
+            values = adjclose or close or []
 
             if not timestamps or not values:
                 continue
@@ -1059,7 +878,7 @@ def _download_yahoo_chart(tickers: List[str], start_date: str) -> pd.DataFrame:
 
 def _download_prices(tickers: List[str], start_date: str) -> pd.DataFrame:
     try:
-        data = yf.download(tickers, start=start_date, auto_adjust=False, progress=False)
+        data = yf.download(tickers, start=start_date, auto_adjust=True, progress=False)
         if "Close" in data:
             prices = data["Close"]
             if isinstance(prices, pd.Series):
@@ -1186,8 +1005,6 @@ def robust_pair(req: RobustPairRequest):
         max_half_life_filter=req.max_half_life_filter,
         windows_to_test=req.windows_to_test,
         stds_to_test=req.stds_to_test,
-        formation_days=req.formation_days,
-        trading_days=req.trading_days,
     )
     if data is None:
         raise HTTPException(status_code=400, detail="Pair could not be analyzed.")
