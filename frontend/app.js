@@ -71,7 +71,6 @@ const parseDecimal = value => parseFloat(String(value).replace(',', '.'));
 const isNoSignal = value => !value || String(value).toUpperCase().startsWith('SIN SE');
 const hasActiveSignal = value => !isNoSignal(value);
 const modelLabel = value => value === 'ROBUST_OLS' ? 'ROBUST OLS' : 'RATIO';
-const tradeModeLabel = value => value === 'OPTIONS' ? 'OPTIONS' : 'SHARES';
 
 function setMsg(id, text, cls = '') {
   const el = document.getElementById(id);
@@ -440,9 +439,7 @@ let lastRobustTradePlan = null;
 
 function robustTradePrefs() {
   return {
-    trade_mode: document.getElementById('r-trade-mode').value,
     usd_per_leg: parseDecimal(document.getElementById('r-usd-leg').value),
-    target_dte: parseInt(document.getElementById('r-target-dte').value, 10),
   };
 }
 
@@ -459,9 +456,7 @@ async function loadRobustTradePlan(summary) {
       current_signal: summary.current_signal,
       p1_now: summary.p1_now,
       p2_now: summary.p2_now,
-      trade_mode: prefs.trade_mode,
       usd_per_leg: prefs.usd_per_leg,
-      target_dte: prefs.target_dte,
     })
   });
   if (!r.ok) {
@@ -686,17 +681,13 @@ function renderRobustTradePlan(planData) {
   }
 
   tbody.innerHTML = planData.plan.legs.map((leg, idx) => {
-    const detail = planData.trade_mode === 'OPTIONS'
-      ? `${leg.option_type} ${fmtNum(leg.strike, 2)} ${leg.expiry} · ${leg.days_to_expiry}DTE · x${leg.contracts}`
-      : `${leg.direction} ${fmtNum(leg.shares, 3)} shares`;
-    const notional = planData.trade_mode === 'OPTIONS'
-      ? fmtMoney(leg.entry_cost)
-      : fmtMoney(leg.entry_notional);
+    const detail = `${leg.direction} ${fmtNum(leg.shares, 3)} shares`;
+    const notional = fmtMoney(leg.entry_notional);
 
     return `<tr>
       <td>LEG ${idx + 1}</td>
-      <td><strong>${leg.ticker}</strong>${planData.trade_mode === 'OPTIONS' ? `<div class="dim">${leg.contract_symbol}</div>` : ''}</td>
-      <td><span class="signal-badge ${leg.direction === 'SHORT' || leg.option_type === 'PUT' ? 'short' : 'long'}">${leg.action}</span></td>
+      <td><strong>${leg.ticker}</strong></td>
+      <td><span class="signal-badge ${leg.direction === 'SHORT' ? 'short' : 'long'}">${leg.action}</span></td>
       <td class="dim">${detail}</td>
       <td class="num">${fmtMoney(leg.entry_price)}</td>
       <td class="num">${notional}</td>
@@ -738,7 +729,7 @@ document.getElementById('save-monitor-robust').addEventListener('click', () => {
 bindResetZoom('reset-robust-spread-zoom', () => robustSpreadChart);
 bindResetZoom('reset-robust-z-zoom', () => robustZChart);
 bindResetZoom('reset-robust-equity-zoom', () => robustEquityChart);
-['r-trade-mode', 'r-usd-leg', 'r-target-dte'].forEach(id => {
+['r-usd-leg'].forEach(id => {
   document.getElementById(id).addEventListener('change', refreshRobustTradePlanFromControls);
 });
 

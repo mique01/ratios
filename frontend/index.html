@@ -161,14 +161,7 @@
         <label><span>TARGET RET</span>   <input id="r-target" type="number" value="0.05" step="0.01" min="0" max="0.5" /></label>
         <label><span>COST/TRD</span>     <input id="r-cost" type="number" value="0.002" step="0.001" min="0" max="0.05" /></label>
         <label><span>MIN SIGNALS</span>  <input id="r-minsig" type="number" value="5" min="1" max="30" /></label>
-        <label class="select-all"><span>TRADE MODE</span>
-          <select id="r-trade-mode">
-            <option value="SHARES">SHARES L/S</option>
-            <option value="OPTIONS">OPTIONS 30D</option>
-          </select>
-        </label>
         <label><span>USD / LEG</span>    <input id="r-usd-leg" type="number" value="1000" min="1" step="100" /></label>
-        <label><span>TARGET DTE</span>   <input id="r-target-dte" type="number" value="30" min="7" max="120" step="1" /></label>
         <label class="check-row"><input id="r-use-target" type="checkbox" /> <span>EXIT ON TARGET</span></label>
         <button id="run-robust" class="btn-run">RUN ROBUST</button>
         <button id="add-watch-robust" class="btn-ghost" disabled>ADD TO WATCHLIST</button>
@@ -219,7 +212,7 @@
       <div class="panel-head">TRADE PLAN</div>
       <div class="panel-body table-wrap">
         <table class="data-table" id="robust-plan-table">
-          <thead><tr><th>LEG</th><th>INSTRUMENT</th><th>ACTION</th><th>DETAIL</th><th>ENTRY</th><th>NOTIONAL/COST</th></tr></thead>
+          <thead><tr><th>LEG</th><th>INSTRUMENT</th><th>ACTION</th><th>DETAIL</th><th>ENTRY</th><th>NOTIONAL</th></tr></thead>
           <tbody><tr><td colspan="6" class="empty">- RUN ROBUST ANALYSIS -</td></tr></tbody>
         </table>
       </div>
